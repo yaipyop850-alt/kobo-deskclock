@@ -17,7 +17,7 @@ local function lfs_attr(path)
 end
 
 local CalStore = {
-    VERSION = "3.3",
+    VERSION = "3.4",
     settings_key = "deskclock",
     urls = nil,           -- cached URL list (re-read on load/sync)
     urls_source = nil,
@@ -296,6 +296,16 @@ function CalStore:sync()
     if #Memo:outbox() > 0 and Memo:pendingCount() > 0 then
         local _, err = Memo:flush(self.post_url)
         send_err = err and ("보내기 실패: " .. err) or nil
+    end
+    -- 2) memos <-> Google Tasks (device wins on conflicts)
+    local post = self:getPostUrl()
+    if post and self:getSettings().tasks_sync ~= false then
+        local ok, res = Memo:syncTasks(post)
+        if ok then
+            self.tasks_changes = res
+        else
+            send_err = (send_err and (send_err .. ", ") or "") .. "할 일: " .. tostring(res)
+        end
     end
     if #urls == 0 then
         self:set("last_error", "캘린더 주소 없음")

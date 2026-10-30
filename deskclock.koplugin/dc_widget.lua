@@ -97,7 +97,20 @@ local function wrapText(str, px, maxw, maxlines, opts)
     end
     local group = VerticalGroup:new{ align = "left" }
     for _, l in ipairs(lines) do
-        table.insert(group, text(l, px, { color = opts and opts.color, bold = opts and opts.bold, max_width = maxw }))
+        local tw = text(l, px, { color = opts and opts.color, bold = opts and opts.bold, max_width = maxw })
+        if opts and opts.strike then
+            -- strikethrough: a line across the middle of the text (TextWidget has no such option)
+            local ts = tw:getSize()
+            local th = math.max(2, math.floor(px / 14))
+            tw = OverlapGroup:new{
+                dimen = Geom:new{ w = ts.w, h = ts.h },
+                tw,
+                VerticalGroup:new{ align = "left",
+                    VerticalSpan:new{ width = math.floor(ts.h * 0.52) },
+                    LineWidget:new{ background = opts.color or BLACK, dimen = Geom:new{ w = ts.w, h = th } } },
+            }
+        end
+        table.insert(group, tw)
     end
     return group
 end
@@ -298,6 +311,15 @@ function DeskWidget:onTapToggle(_, ges)
     local pos = ges and ges.pos
     if not self.sleeping and inRect(pos, self.sync_button) then
         self:syncNow()
+        return true
+    end
+    if not self.sleeping and self.mode ~= "memo" and inRect(pos, self.todo_badge) then
+        self.mode = "memo"
+        self.month_offset = 0
+        self.selected_day = nil
+        self.store:set("mode", "memo")
+        self:updateKeepAwake()
+        self:refresh(true)
         return true
     end
     if self.mode == "memo" then
@@ -599,15 +621,43 @@ function DeskWidget:statusBar(px, maxw, ox, oy)
     }
     local bsz = button:getSize()
     local gap = math.floor(px * 0.8)
+    -- "할 일 N": open to-dos, a small black badge next to the button (tap = memo screen)
+    local badge, badge_w = nil, 0
+    local open_n = Memo:openCount()
+    self.todo_badge = nil
+    if open_n > 0 then
+        local lbl = text("할 일 " .. open_n, px * 0.9, { bold = true, color = WHITE })
+        local ls = lbl:getSize()
+        local bpx, bpy = math.floor(px * 0.4), math.floor(px * 0.12)
+        badge = FrameContainer:new{
+            bordersize = 0, radius = math.floor(ls.h / 2 + bpy), margin = 0, background = BLACK,
+            padding = 0, padding_left = bpx, padding_right = bpx, padding_top = bpy, padding_bottom = bpy,
+            lbl,
+        }
+        badge_w = ls.w + 2 * bpx
+    end
+    local bgap = math.floor(px * 0.5)
     local status = self.sync_state and "" or self:statusText()
-    local st = text(status, px, { color = GRAY, max_width = math.max(px * 4, maxw - bsz.w - gap) })
-    local group = HorizontalGroup:new{ align = "center", st, HorizontalSpan:new{ width = gap }, button }
+    local reserved = bsz.w + gap + (badge and (badge_w + bgap) or 0)
+    local st = text(status, px, { color = GRAY, max_width = math.max(px * 4, maxw - reserved) })
+    local group = HorizontalGroup:new{ align = "center", st, HorizontalSpan:new{ width = gap } }
+    if badge then
+        table.insert(group, badge)
+        table.insert(group, HorizontalSpan:new{ width = bgap })
+    end
+    table.insert(group, button)
     local gs = group:getSize()
-    -- generous touch area around the small button (e-ink fingers are not precise)
-    local bx = ox + st:getSize().w + gap
-    local by = oy + math.floor((gs.h - bsz.h) / 2)
+    -- generous touch areas around the small buttons (e-ink fingers are not precise)
     local slack = math.floor(px * 0.6)
-    self.sync_button = { x = bx - slack, y = by - slack, w = bsz.w + 2 * slack, h = bsz.h + 2 * slack }
+    local x = ox + st:getSize().w + gap
+    if badge then
+        local bh = badge:getSize().h
+        local by0 = oy + math.floor((gs.h - bh) / 2)
+        self.todo_badge = { x = x - slack, y = by0 - slack, w = badge_w + bgap / 2 + slack, h = bh + 2 * slack }
+        x = x + badge_w + bgap
+    end
+    local by = oy + math.floor((gs.h - bsz.h) / 2)
+    self.sync_button = { x = x - math.floor(bgap / 2), y = by - slack, w = bsz.w + slack + math.floor(bgap / 2), h = bsz.h + 2 * slack }
     return group
 end
 
@@ -1550,6 +1600,22 @@ function DeskWidget:onMemoItem(r)
     local ConfirmBox = require("ui/widget/confirmbox")
     if r.kind == "add_memo" then return self:editMemo(nil) end
     if r.kind == "add_event" then return self:askEventTitle(nil, nil) end
+    if r.kind == "check" then
+        Memo:toggleDone(r.memo.id)
+        self:refresh(false)
+        return
+    end
+    if r.kind == "clear_done" then
+        local n = Memo:doneCount()
+        UIManager:show(ConfirmBox:new{
+            text = string.format("완료한 항목 %d개를 지울까요?", n)
+                .. (self.store:getSettings().tasks_sync ~= false and self.store:getPostUrl()
+                    and "\n(구글 할 일에서도 다음 동기화 때 지워집니다)" or ""),
+            ok_text = "지우기",
+            ok_callback = function() Memo:clearDone(); self:refresh(true) end,
+        })
+        return
+    end
     local bd
     if r.kind == "memo" then
         local m = r.memo
@@ -1557,6 +1623,8 @@ function DeskWidget:onMemoItem(r)
             title = m.text,
             buttons = {
                 {
+                    { text = m.done and "완료 취소" or "완료", callback = function()
+                        UIManager:close(bd); Memo:toggleDone(m.id); self:refresh(false) end },
                     { text = "수정", callback = function() UIManager:close(bd); self:editMemo(m) end },
                     { text = "일정으로 등록", callback = function()
                         UIManager:close(bd)
@@ -1641,10 +1709,29 @@ function DeskWidget:buildMemo(W, H)
     local bgap = math.floor(item_px * 0.8)
     y = y + math.floor(item_px * 0.7)
     table.insert(page, VerticalSpan:new{ width = math.floor(item_px * 0.7) })
-    table.insert(page, HorizontalGroup:new{ align = "center", b1, HorizontalSpan:new{ width = bgap }, b2 })
+    local done_n = Memo:doneCount()
+    local open_n = Memo:openCount()
+    local brow = HorizontalGroup:new{ align = "center", b1, HorizontalSpan:new{ width = bgap }, b2 }
+    local b3, b3w
+    if done_n > 0 then
+        b3, b3w = button("완료 지우기")
+        table.insert(brow, HorizontalSpan:new{ width = bgap })
+        table.insert(brow, b3)
+    end
+    -- counts on the right of the button row
+    local counts = text(string.format("할 일 %d · 완료 %d", open_n, done_n), small_px, { color = GRAY })
+    table.insert(page, OverlapGroup:new{
+        dimen = Geom:new{ w = cw, h = bh },
+        LeftContainer:new{ dimen = Geom:new{ w = cw, h = bh }, brow },
+        RightContainer:new{ dimen = Geom:new{ w = cw, h = bh }, counts },
+    })
     local slack = math.floor(item_px * 0.4)
     table.insert(self.memo_rects, { kind = "add_memo", x = pad - slack, y = y - slack, w = b1w + 2 * slack, h = bh + 2 * slack })
     table.insert(self.memo_rects, { kind = "add_event", x = pad + b1w + bgap - slack, y = y - slack, w = b2w + 2 * slack, h = bh + 2 * slack })
+    if b3 then
+        table.insert(self.memo_rects, { kind = "clear_done", x = pad + b1w + b2w + 2 * bgap - slack, y = y - slack,
+            w = b3w + 2 * slack, h = bh + 2 * slack })
+    end
     y = y + bh
 
     ------------------------------------------------ rows (outbox, then memos), paged
@@ -1659,20 +1746,50 @@ function DeskWidget:buildMemo(W, H)
             main = "◇ " .. fmtDate(day) .. " " .. (it.time or "종일") .. "  " .. it.title,
             sub = state, sub_color = (it.error and it.state ~= "sent") and BLACK or GRAY })
     end
+    local tasks_on = self.store:getSettings().tasks_sync ~= false and self.store:getPostUrl()
     for _, mm in ipairs(Memo:memos()) do
         -- preview: line breaks shown as " · " so a multi-line memo is not cut at its first line
+        local when = mm.done and mm.done_at and ("완료 " .. os.date("!%m/%d %H:%M", mm.done_at + self.store:offset()))
+            or os.date("!%m/%d %H:%M", (mm.edited or mm.created) + self.store:offset())
         table.insert(rows, { kind = "memo", memo = mm, main = (mm.text:gsub("%s*\n+%s*", " · ")),
-            sub = os.date("!%m/%d %H:%M", (mm.edited or mm.created) + self.store:offset()) })
+            done = mm.done,
+            sub = when .. ((tasks_on and Memo:isUnsynced(mm)) and " · 구글 할 일 반영 전" or "") })
     end
 
     local avail = H - pad - y - math.floor(item_px * 2.2)
     local pages, cur, used = {}, {}, 0
     local built = {}
+    -- check box column for memos
+    local box = math.floor(item_px * 0.95)
+    local box_gap = math.floor(item_px * 0.55)
+    local tw_memo = cw - box - box_gap
     for i, r in ipairs(rows) do
-        local body = wrapText(r.main, item_px, cw, r.kind == "memo" and 3 or 2)
-        local sub = text(r.sub, small_px, { color = r.sub_color or GRAY, max_width = cw })
-        local h = math.floor(item_px * 0.6) + body:getSize().h + sub:getSize().h + math.floor(item_px * 0.3) + 1
-        built[i] = { body = body, sub = sub, h = h }
+        local is_memo = r.kind == "memo"
+        local bw = is_memo and tw_memo or cw
+        local body = wrapText(r.main, item_px, bw, is_memo and 3 or 2,
+            r.done and { color = GRAY, strike = true } or nil)
+        local sub = text(r.sub, small_px, { color = r.sub_color or GRAY, max_width = bw })
+        local bsz, ssz = body:getSize(), sub:getSize()
+        local h = math.floor(item_px * 0.6) + bsz.h + ssz.h + math.floor(item_px * 0.3) + 1
+        local row
+        if is_memo then
+            local th = math.floor(item_px * 1.362 + 0.5)
+            local mark = r.done and text("✓", item_px * 0.85, { bold = true, color = GRAY }) or VerticalSpan:new{ width = 0 }
+            local checkbox = FrameContainer:new{
+                bordersize = math.max(2, math.floor(item_px / 16)), radius = 0, margin = 0, padding = 0,
+                color = r.done and GRAY or BLACK, background = WHITE,
+                CenterContainer:new{ dimen = Geom:new{ w = box - 2 * math.max(2, math.floor(item_px / 16)),
+                    h = box - 2 * math.max(2, math.floor(item_px / 16)) }, mark },
+            }
+            row = HorizontalGroup:new{ align = "top",
+                VerticalGroup:new{ align = "left", VerticalSpan:new{ width = math.max(0, math.floor((th - box) / 2)) }, checkbox },
+                HorizontalSpan:new{ width = box_gap },
+                VerticalGroup:new{ align = "left", body, sub },
+            }
+        else
+            row = VerticalGroup:new{ align = "left", body, sub }
+        end
+        built[i] = { row = row, h = h }
         if used + h > avail and #cur > 0 then
             table.insert(pages, cur); cur, used = {}, 0
         end
@@ -1692,17 +1809,25 @@ function DeskWidget:buildMemo(W, H)
             local r, b = rows[i], built[i]
             table.insert(page, LineWidget:new{ background = LIGHT, dimen = Geom:new{ w = cw, h = 1 } })
             table.insert(page, VerticalSpan:new{ width = math.floor(item_px * 0.6) })
-            table.insert(page, b.body)
-            table.insert(page, b.sub)
+            table.insert(page, b.row)
             table.insert(page, VerticalSpan:new{ width = math.floor(item_px * 0.3) })
-            table.insert(self.memo_rects, { kind = r.kind, memo = r.memo, item = r.item,
-                x = pad, y = y, w = cw, h = b.h })
+            if r.kind == "memo" then
+                -- the box (with a generous margin) toggles done; the rest opens the menu
+                local cwid = box + box_gap
+                table.insert(self.memo_rects, { kind = "check", memo = r.memo,
+                    x = pad - math.floor(pad * 0.8), y = y, w = cwid + math.floor(pad * 0.8), h = b.h })
+                table.insert(self.memo_rects, { kind = "memo", memo = r.memo,
+                    x = pad + cwid, y = y, w = cw - cwid, h = b.h })
+            else
+                table.insert(self.memo_rects, { kind = r.kind, memo = r.memo, item = r.item,
+                    x = pad, y = y, w = cw, h = b.h })
+            end
             y = y + b.h
         end
     end
 
     local footer = text(npages > 1 and string.format("%d / %d 쪽 · 좌우로 쓸어 넘기기", self.memo_page, npages)
-        or "메모를 탭하면 수정·삭제·일정 등록", small_px, { color = GRAY })
+        or "네모 칸: 완료 표시 · 글: 수정·삭제·일정 등록", small_px, { color = GRAY })
     return OverlapGroup:new{
         dimen = Geom:new{ w = W, h = H },
         FrameContainer:new{ bordersize = 0, margin = 0, padding = pad, padding_bottom = 0, background = WHITE, page },

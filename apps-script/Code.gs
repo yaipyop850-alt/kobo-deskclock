@@ -10,6 +10,12 @@
  *   5) 기기의 deskclock_urls.txt 에 한 줄 추가:
  *        >웹앱URL?key=SECRET값
  *
+ * 구글 할 일(Tasks) 동기화 (v3.4~):
+ *   a) 편집기 왼쪽 '서비스' 옆 + → 'Tasks API' 선택 → 추가 (식별자 Tasks 그대로)
+ *   b) 위쪽 함수 선택에서 authorize 를 고르고 [실행] → 권한 승인
+ *   c) 배포 → 배포 관리 → 연필(수정) → 버전: 새 버전 → 배포 (주소는 그대로)
+ *   기기의 메모가 '내 할 일' 목록과 양방향으로 맞춰집니다. 둘 다 고쳤으면 기기 쪽이 이깁니다.
+ *
  * 기기는 이 주소로 일정(제목·날짜·시각)만 보냅니다. 주소와 키를 아는 사람은
  * 일정을 '추가'할 수 있으므로 공유하지 마세요. 노출되면 SECRET을 바꾸고
  * 기기 파일의 key= 값도 바꾸면 됩니다.
@@ -28,20 +34,107 @@ function calendar_() {
     : CalendarApp.getCalendarById(CALENDAR_ID);
 }
 
+/** 편집기에서 한 번 [실행]해 캘린더·할 일 권한을 승인하는 용도 */
+function authorize() {
+  calendar_().getName();
+  Tasks.Tasklists.list({ maxResults: 1 });
+}
+
+function tasksReady_() {
+  try {
+    if (typeof Tasks === 'undefined') return false;
+    Tasks.Tasklists.list({ maxResults: 1 });
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
 /** 연결 시험: 기기 메뉴의 [쓰기 연결 시험]이 호출 */
 function doGet(e) {
   const p = (e && e.parameter) || {};
   if (p.key !== SECRET) return out_('ERR key');
   if (SECRET.indexOf('여기에') === 0) return out_('ERR secret-not-set');
-  return out_('OK tz=' + Session.getScriptTimeZone() + ' cal=' + calendar_().getName());
+  return out_('OK tz=' + Session.getScriptTimeZone() + ' tasks=' + (tasksReady_() ? 'ok' : 'off')
+    + ' cal=' + calendar_().getName());
 }
 
-/** 일정 추가: key, action=add, uid, title, date=YYYY-MM-DD, [time=HH:MM], [minutes] */
 function doPost(e) {
   const p = (e && e.parameter) || {};
   if (p.key !== SECRET) return out_('ERR key');
   if (SECRET.indexOf('여기에') === 0) return out_('ERR secret-not-set');
-  if (p.action !== 'add') return out_('ERR action');
+  if (p.action === 'add') return addEvent_(p);
+  if (p.action === 'tasks') return syncTasks_(p);
+  return out_('ERR action');
+}
+
+/* ---------------------------------------------------------------- 구글 할 일
+ * 요청 data: 줄마다  U<TAB>메모id<TAB>할일id(없으면 빈칸)<TAB>0|1<TAB>제목<TAB>메모
+ *                   D<TAB>할일id
+ * 응답: OK tasks / M<TAB>메모id<TAB>할일id / T<TAB>할일id<TAB>0|1<TAB>제목<TAB>메모
+ * 기기 쪽 변경을 먼저 그대로 적용(기기 우선)한 뒤 전체 목록을 돌려줍니다.
+ */
+const TASKLIST = '@default';   // '내 할 일' 목록
+
+function esc_(s) {
+  return String(s || '').replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\r/g, '').replace(/\n/g, '\\n');
+}
+
+function unesc_(s) {
+  return String(s || '').replace(/\\(.)/g, function (m, c) {
+    return c === 'n' ? '\n' : c === 't' ? '\t' : c;
+  });
+}
+
+function syncTasks_(p) {
+  if (!tasksReady_()) return out_('ERR tasks-off');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const out = ['OK tasks'];
+    String(p.data || '').split('\n').forEach(function (line) {
+      if (!line) return;
+      const f = line.split('\t').map(unesc_);
+      if (f[0] === 'U') {
+        const done = f[3] === '1';
+        const body = { title: f[4] || '(제목 없음)', notes: f[5] || '', status: done ? 'completed' : 'needsAction' };
+        if (!done) body.completed = null;
+        let id = f[2] || '';
+        if (id) {
+          // 휴대폰에서 지운 할 일이면 새로 만든다 (기기 우선)
+          let cur = null;
+          try { cur = Tasks.Tasks.get(TASKLIST, id); } catch (err) { cur = null; }
+          if (!cur || cur.deleted) {
+            id = '';
+          } else {
+            Tasks.Tasks.patch(body, TASKLIST, id);
+          }
+        }
+        if (!id) id = Tasks.Tasks.insert(body, TASKLIST).id;
+        out.push(['M', esc_(f[1]), esc_(id)].join('\t'));
+      } else if (f[0] === 'D' && f[1]) {
+        try { Tasks.Tasks.remove(TASKLIST, f[1]); } catch (err) { /* 이미 없음 */ }
+      }
+    });
+    let token = null;
+    do {
+      const opts = { showCompleted: true, showHidden: true, maxResults: 100 };
+      if (token) opts.pageToken = token;
+      const r = Tasks.Tasks.list(TASKLIST, opts);
+      (r.items || []).forEach(function (t) {
+        if (!t.title) return;
+        out.push(['T', esc_(t.id), t.status === 'completed' ? '1' : '0', esc_(t.title), esc_(t.notes || '')].join('\t'));
+      });
+      token = r.nextPageToken;
+    } while (token);
+    return out_(out.join('\n'));
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** 일정 추가: key, action=add, uid, title, date=YYYY-MM-DD, [time=HH:MM], [minutes] */
+function addEvent_(p) {
 
   const title = String(p.title || '').trim().slice(0, 200);
   if (!title) return out_('ERR title');

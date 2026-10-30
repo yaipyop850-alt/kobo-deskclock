@@ -30,16 +30,23 @@ local HELP = [[
 · 빈 곳 탭: 시계 → 달력+목록 → 전체 달력 → 메모 순서로 전환
 · 달력에서 날짜 칸 길게 누르기: 그 날짜에 일정 추가(구글 캘린더로 전송)
 · 전체 달력에서 날짜 탭: 그날 일정 전체 팝업(전환은 맨 위 제목 줄을 탭)
-
-■ D-day
-구글 캘린더 일정 제목 앞에 [D]를 붙이면(예: [D] 2차 지필고사) 가까운 순으로 2개까지 "D-45 2차 지필고사"처럼 표시됩니다. 화면에는 [D]를 뺀 이름이 나옵니다.
 · 길게 누르기(날짜 칸 밖): 나가기
 · 아래쪽 [동기화] 버튼 또는 아래로 쓸기: Wi-Fi 켜기 → 동기화 → Wi-Fi 끄기
+· [동기화] 옆 '할 일 N' 탭: 메모 화면으로
 · 위로 쓸기: 화면 90° 회전(가로↔세로), 다음에 열 때도 유지
 · 전원 버튼: 잠들면서 달력을 화면에 남김(잠든 동안 전력 거의 0)
 · 달력에서 좌/우로 쓸기: 다음/이전 달
 · 달력에서 날짜 탭: 그날부터 일정 보기
 · 오른쪽 위 [◀ 오늘로] 탭: 오늘로 돌아가기(5분간 손대지 않아도 자동 복귀)
+
+■ 메모·할 일
+· 왼쪽 네모 칸 탭: 완료(회색·취소선, 아래로 이동) / 다시 탭하면 되돌림
+· 글 탭: 수정·삭제·일정으로 등록
+· [완료 지우기]: 완료 항목을 한꺼번에 삭제
+· 구글 '내 할 일'과 동기화(메뉴에서 켜고 끔): 동기화할 때마다 양쪽을 맞추며, 양쪽에서 같은 항목을 고쳤으면 기기 쪽이 남습니다.
+
+■ D-day
+구글 캘린더 일정 제목 앞에 [D]를 붙이면(예: [D] 2차 지필고사) 가까운 순으로 2개까지 "D-45 2차 지필고사"처럼 표시됩니다. 화면에는 [D]를 뺀 이름이 나옵니다.
 
 ■ 캘린더 주소
 구글 캘린더(PC) → 설정 → 해당 캘린더 → '캘린더 통합' → 'iCal 형식의 비공개 주소'를 복사합니다.
@@ -48,7 +55,7 @@ KOReader 폴더(.adds/koreader)에 deskclock_urls.txt 파일을 만들고 한 �
 · 주소 앞에 !를 붙이면 공휴일 캘린더로 표시
 
 ■ 동기화
-Wi-Fi가 이미 연결되어 있을 때만 자동 동기화합니다(Wi-Fi를 스스로 켜지 않음).
+Wi-Fi가 이미 연결되어 있을 때만 자동 동기화합니다(메뉴에서 'Wi-Fi 자동 켜고 끄기'를 켜면 잠시 켭니다).
 시계 화면이 떠 있는 동안에는 자동 절전이 멈추므로 충전기 연결을 권장합니다.]]
 
 function DeskClock:onDispatcherRegisterActions()
@@ -288,7 +295,7 @@ function DeskClock:showDiagnostics()
         pdesc = pdesc .. "\n  ※ 구글 캘린더에 쓰기 주소 일정이 남아 있음 — 지워도 됩니다"
     end
     table.insert(lines, "쓰기 주소: " .. pdesc
-        .. string.format(" · 보낼 일정 %d건 · 메모 %d개", M:pendingCount(), #M:memos()))
+        .. string.format(" · 보낼 일정 %d건 · 메모 %d개(할 일 %d)", M:pendingCount(), #M:memos(), M:openCount()))
     if CalStore.stats.parse_seconds then
         table.insert(lines, string.format("처리 시간: 해석 %.1f초, 반복 전개 %.1f초",
             CalStore.stats.parse_seconds, CalStore.stats.expand_seconds or 0))
@@ -438,6 +445,14 @@ function DeskClock:addToMainMenu(menu_items)
                 text = "구글 캘린더 쓰기 연결 시험",
                 keep_menu_open = true,
                 callback = function() self:testWrite() end,
+            },
+            {
+                text = "메모를 구글 할 일과 동기화",
+                help_text = "켜 두면 동기화할 때마다 메모 화면의 항목이 구글 '내 할 일' 목록과 양방향으로 맞춰집니다. 같은 항목을 양쪽에서 고쳤으면 기기 쪽 내용이 남습니다. Apps Script에 Tasks 서비스를 추가해야 합니다(설치 가이드 8단계).",
+                checked_func = function() return CalStore:getSettings().tasks_sync ~= false end,
+                callback = function()
+                    CalStore:set("tasks_sync", CalStore:getSettings().tasks_sync == false)
+                end,
                 separator = true,
             },
             {
