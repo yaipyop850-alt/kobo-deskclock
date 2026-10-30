@@ -306,6 +306,15 @@ function DeskWidget:showEventDetail(o, day)
     })
 end
 
+function DeskWidget:openMemoScreen()
+    self.mode = "memo"
+    self.month_offset = 0
+    self.selected_day = nil
+    self.store:set("mode", "memo")
+    self:updateKeepAwake()
+    self:refresh(true)
+end
+
 function DeskWidget:onTapToggle(_, ges)
     self.last_touch = os.time()
     local pos = ges and ges.pos
@@ -313,13 +322,21 @@ function DeskWidget:onTapToggle(_, ges)
         self:syncNow()
         return true
     end
+    if not self.sleeping and self.mode == "clock" then
+        for _, r in ipairs(self.clock_todo_rects or {}) do
+            if inRect(pos, r) then
+                if r.kind == "check" then
+                    Memo:toggleDone(r.memo.id)
+                    self:refresh(false)
+                else
+                    self:openMemoScreen()
+                end
+                return true
+            end
+        end
+    end
     if not self.sleeping and self.mode ~= "memo" and inRect(pos, self.todo_badge) then
-        self.mode = "memo"
-        self.month_offset = 0
-        self.selected_day = nil
-        self.store:set("mode", "memo")
-        self:updateKeepAwake()
-        self:refresh(true)
+        self:openMemoScreen()
         return true
     end
     if self.mode == "memo" then
@@ -744,120 +761,253 @@ end
 ---------------------------------------------------------------- clock mode
 
 function DeskWidget:buildClock(W, H)
+    -- Portrait: clock on top, then upcoming events, then open to-dos (full width,
+    -- so titles are not cut). Landscape: a bigger clock on top, then two columns
+    -- [events | to-dos]. Everything is stacked from the top; the status bar sits
+    -- at the bottom.
     local store = self.store
     local now = store:now()
     local today = ICS.dayStart(now)
     local d = os.date("!*t", now)
     local m = math.min(W, H)
+    local land = W > H
+    local pad = math.floor(m * 0.05)
+    local cw = W - 2 * pad
 
-    local time_px = math.min(H * 0.30, W / 3.0)
-    local date_px = m * 0.065
-    local ev_px = m * 0.042
+    local time_px = land and math.min(m * 0.28, cw / 2.75) or math.min(m * 0.28, cw / 3.0)
+    local date_px = land and m * 0.046 or m * 0.05
+    local dday_px = land and m * 0.037 or m * 0.04
+    local ev_px = land and m * 0.033 or m * 0.036
     local status_px = m * 0.028
-    local content_w = math.floor(W * 0.86)
+    local line_h = math.max(1, math.floor(m * 0.003))
+    self.clock_todo_rects = {}
 
     local date_str = string.format("%d년 %d월 %d일 %s요일", d.year, d.month, d.day, WDAY[d.wday])
     local hol = store:holidaysOnDay(today)
     if hol then date_str = date_str .. "  ·  " .. table.concat(hol, ", ") end
 
-    local main = VerticalGroup:new{
-        align = "center",
-        text(string.format("%02d:%02d", d.hour, d.min), time_px, { bold = true }),
-        VerticalSpan:new{ width = math.floor(m * 0.01) },
-        text(date_str, date_px, { max_width = content_w }),
-    }
-    local drow = self:ddayRow(date_px * 0.62, content_w, 2)
+    -- NOTE: never call getSize() on a group that will still receive children
+    -- (KOReader caches the layout on the first getSize()). Heights are summed
+    -- by hand from leaf widgets instead.
+    local top = VerticalGroup:new{ align = "left" }
+    local y = 0
+    local function add(wdg, h)
+        table.insert(top, wdg)
+        y = y + (h or wdg:getSize().h)
+    end
+    local function vspace(px) add(VerticalSpan:new{ width = math.floor(px) }, math.floor(px)) end
+    local function centered(wdg, h)
+        h = h or wdg:getSize().h
+        return CenterContainer:new{ dimen = Geom:new{ w = W, h = h }, wdg }, h
+    end
+    local function hline(w)
+        return HorizontalGroup:new{ HorizontalSpan:new{ width = pad },
+            LineWidget:new{ background = LIGHT, dimen = Geom:new{ w = w, h = line_h } } }
+    end
+
+    vspace(land and m * 0.025 or m * 0.045)
+    -- TextWidget's box is the font's full line height; the digits only use the
+    -- middle ~55% of it. A shorter centered box trims the empty top and bottom.
+    local tbox = math.floor(time_px * 0.80)
+    add(centered(text(string.format("%02d:%02d", d.hour, d.min), time_px, { bold = true }), tbox))
+    vspace(m * 0.012)
+    add(centered(text(date_str, date_px, { max_width = cw })))
+    local drow = self:ddayRow(dday_px, cw, 2)
     if drow then
-        table.insert(main, VerticalSpan:new{ width = math.floor(m * 0.02) })
-        table.insert(main, drow)
+        vspace(m * 0.01)
+        add(centered(drow))
     end
-    for _, wdg in ipairs{
-        VerticalSpan:new{ width = math.floor(m * 0.05) },
-        LineWidget:new{ background = LIGHT, dimen = Geom:new{ w = content_w, h = math.max(1, math.floor(m * 0.003)) } },
-        VerticalSpan:new{ width = math.floor(m * 0.035) },
-    } do table.insert(main, wdg) end
+    vspace(land and m * 0.025 or m * 0.03)
+    add(hline(cw), line_h)
+    local sep_gap = math.floor(land and m * 0.03 or m * 0.035)
+    vspace(sep_gap)
 
-    local list = VerticalGroup:new{ align = "left" }
-    local clock_rows = {}
-    -- main is centered vertically, so it must leave the status bar's height free
-    -- at the bottom *and* (by symmetry) at the top.
-    local status_reserve = math.floor(status_px * 2.2) + math.floor(m * 0.03)
-    -- NOTE: never call getSize() on a group that will still receive children:
-    -- KOReader caches the layout on the first getSize() (stale layout = crash).
-    local function sumHeights(group)
-        local hsum = 0
-        for _, c in ipairs(group) do hsum = hsum + c:getSize().h end
-        return hsum
-    end
-    local list_budget = H - 2 * status_reserve - sumHeights(main)
-    local list_h = 0
-    local upcoming = store:upcoming(3, 2)
-    if #store:getUrls() == 0 then
-        table.insert(list, text("메뉴에서 구글 캘린더 주소를 설정하면 일정이 표시됩니다", ev_px * 0.8, { color = GRAY, max_width = content_w }))
-    elseif #upcoming == 0 then
-        table.insert(list, text("오늘·내일 남은 일정 없음", ev_px, { color = GRAY, max_width = content_w }))
-    else
-        for _, o in ipairs(upcoming) do
-            local oday = math.max(ICS.dayStart(o.start), today)
-            local when
-            if o.start <= now and o.stop > now and not o.allday then
-                when = "진행 중"
-            else
-                when = dayLabel(oday, today) .. " " .. eventTime(o, oday)
-            end
-            local when_w = text(when, ev_px, { bold = true })
-            local gap = math.floor(ev_px * 0.8)
-            local row = HorizontalGroup:new{
-                align = "top",
-                when_w,
-                HorizontalSpan:new{ width = gap },
-                wrapText(o.summary, ev_px, math.max(ev_px * 3, content_w - when_w:getSize().w - gap), 2),
-            }
-            -- Only as many events as fit between the date block and the status bar.
-            local need = row:getSize().h + math.floor(ev_px * 0.45)
-            if list_h + need > list_budget then break end
-            list_h = list_h + need
-            table.insert(list, row)
-            table.insert(clock_rows, { widget = row, occ = o, day = oday })
-            table.insert(list, VerticalSpan:new{ width = math.floor(ev_px * 0.45) })
-        end
-    end
-    table.insert(main, list)
-
-    -- Absolute touch areas of the event rows (main is centered on screen,
-    -- list is centered inside main, rows stacked inside list).
-    main:resetLayout()
-    list:resetLayout()
-    local ms, ls = main:getSize(), list:getSize()
-    local mx, my = math.floor((W - ms.w) / 2), math.floor((H - ms.h) / 2)
-    local ly = my
-    for i = 1, #main - 1 do ly = ly + main[i]:getSize().h end
-    local lx = mx + math.floor((ms.w - ls.w) / 2)
-    local y = ly
-    local by_widget = {}
-    for _, r in ipairs(clock_rows) do by_widget[r.widget] = r end
-    for _, child in ipairs(list) do
-        local sz = child:getSize()
-        local r = by_widget[child]
-        if r then
-            table.insert(self.event_rects, { x = 0, y = y, w = W, h = sz.h, occ = r.occ, day = r.day })
-        end
-        y = y + sz.h
-    end
-
-    -- Status bar centered at the bottom; measure first to know where it lands.
+    -- status bar (measured first: the lists may use everything above it)
     local bottom_h = H - math.floor(m * 0.03)
     local probe = self:statusBar(status_px, math.floor(W * 0.9), 0, 0)
     local ps = probe:getSize()
     local sx, sy = math.floor((W - ps.w) / 2), bottom_h - ps.h
+    local lists_bottom = sy - math.floor(m * 0.03)
+
+    ------------------------------------------------ list builders
+    local row_h = text("가", ev_px):getSize().h
+    local row_gap = math.floor(ev_px * 0.28)
+    local time_col = math.max(text("진행 중", ev_px * 0.9):getSize().w, text("00:00", ev_px * 0.9):getSize().w)
+    local tgap = math.floor(ev_px * 0.6)
+
+    local function whenOf(o, oday)
+        if o.start <= now and o.stop > now and not o.allday then return "진행 중" end
+        if o.allday then return "종일" end
+        if o.start < oday then
+            if o.stop >= oday + DAY then return "종일" end
+            return "~" .. hm(o.stop)
+        end
+        return hm(o.start)
+    end
+    local function headOf(oday)
+        local diff = math.floor((oday - today) / DAY)
+        if diff == 0 then return "오늘" end
+        local dd = os.date("!*t", oday)
+        local md = string.format("%d/%d(%s)", dd.month, dd.day, WDAY[dd.wday])
+        if diff == 1 then return "내일 " .. md end
+        if diff == 2 then return "모레 " .. md end
+        return md
+    end
+
+    --- Events column: day headings + "time  title" rows, as many as fit in `budget`.
+    -- @return group, used height, rows {y, h, occ, day} relative to the column top
+    local function eventsColumn(width, budget)
+        local col = VerticalGroup:new{ align = "left" }
+        local used, rects = 0, {}
+        local function put(wdg, h) table.insert(col, wdg); used = used + h end
+        if #store:getUrls() == 0 then
+            put(wrapText("메뉴에서 구글 캘린더 주소를 설정하면 일정이 표시됩니다", ev_px * 0.9, width, 2, { color = GRAY }), row_h * 2)
+            return col, used, rects
+        end
+        local items = store:upcoming(40, 14)
+        if #items == 0 then
+            put(text("앞으로 2주 동안 일정 없음", ev_px, { color = GRAY, max_width = width }), row_h)
+            return col, used, rects
+        end
+        local last_day
+        for _, o in ipairs(items) do
+            local oday = math.max(ICS.dayStart(o.start), today)
+            local need = row_h + row_gap
+            local new_day = oday ~= last_day
+            if new_day then need = need + row_h + (last_day and row_gap * 2 or 0) end
+            if used + need > budget then break end
+            if new_day then
+                if last_day then put(VerticalSpan:new{ width = row_gap * 2 }, row_gap * 2) end
+                put(text(headOf(oday), ev_px * 0.9, { bold = true, max_width = width }), row_h)
+                last_day = oday
+            end
+            local row = HorizontalGroup:new{ align = "center",
+                LeftContainer:new{ dimen = Geom:new{ w = time_col, h = row_h },
+                    text(whenOf(o, oday), ev_px * 0.9, { color = GRAY }) },
+                HorizontalSpan:new{ width = tgap },
+                text(o.summary, ev_px, { max_width = width - time_col - tgap }),
+            }
+            table.insert(rects, { y = used, h = row_h, occ = o, day = oday })
+            put(row, row_h)
+            put(VerticalSpan:new{ width = row_gap }, row_gap)
+        end
+        return col, used, rects
+    end
+
+    --- To-do column: open memos only, one line each. @return group, used, rects
+    local function todoColumn(width, budget, with_title)
+        local col = VerticalGroup:new{ align = "left" }
+        local used, rects = 0, {}
+        local function put(wdg, h) table.insert(col, wdg); used = used + h end
+        if with_title then
+            put(text("할 일", ev_px * 0.9, { bold = true }), row_h)
+        end
+        local box = math.floor(ev_px * 0.8)
+        local bth = math.max(2, math.floor(ev_px / 16))
+        local open = {}
+        for _, mm in ipairs(Memo:memos()) do if not mm.done then open[#open + 1] = mm end end
+        for i, mm in ipairs(open) do
+            local need = row_h + row_gap
+            -- keep room for the "…외 N개" line while more items follow
+            local tail = i < #open and row_h or 0
+            if used + need + tail > budget then
+                local more = #open - i + 1
+                if used + row_h > budget and #rects > 0 then
+                    -- not even the note fits: give up the last row for it
+                    table.remove(col); table.remove(col); used = used - row_h - row_gap
+                    table.remove(rects)
+                    more = more + 1
+                end
+                if used + row_h <= budget then
+                    put(text(string.format("…외 %d개 (탭하면 메모 화면)", more), ev_px * 0.85, { color = GRAY }), row_h)
+                    table.insert(rects, { y = used - row_h, h = row_h, kind = "open" })
+                end
+                break
+            end
+            local row = HorizontalGroup:new{ align = "center",
+                FrameContainer:new{ bordersize = bth, radius = 0, margin = 0, padding = 0, color = BLACK, background = WHITE,
+                    CenterContainer:new{ dimen = Geom:new{ w = box - 2 * bth, h = box - 2 * bth }, VerticalSpan:new{ width = 0 } } },
+                HorizontalSpan:new{ width = math.floor(ev_px * 0.45) },
+                text((mm.text:gsub("%s*\n+%s*", " · ")), ev_px, { max_width = width - box - math.floor(ev_px * 0.45) }),
+            }
+            table.insert(rects, { y = used, h = row_h, memo = mm, box_w = box + math.floor(ev_px * 0.45) })
+            put(row, row_h)
+            put(VerticalSpan:new{ width = row_gap }, row_gap)
+        end
+        return col, used, rects
+    end
+
+    local function addEventRects(rects, x, w, col_top)
+        for _, r in ipairs(rects) do
+            table.insert(self.event_rects, { x = x, y = col_top + r.y - math.floor(row_gap / 2),
+                w = w, h = r.h + row_gap, occ = r.occ, day = r.day })
+        end
+    end
+    local function addTodoRects(rects, x, w, col_top)
+        for _, r in ipairs(rects) do
+            local ry, rh = col_top + r.y - math.floor(row_gap / 2), r.h + row_gap
+            if r.memo then
+                table.insert(self.clock_todo_rects, { kind = "check", memo = r.memo,
+                    x = x - math.floor(pad * 0.8), y = ry, w = r.box_w + math.floor(pad * 0.8), h = rh })
+                table.insert(self.clock_todo_rects, { kind = "open", x = x + r.box_w, y = ry, w = w - r.box_w, h = rh })
+            else
+                table.insert(self.clock_todo_rects, { kind = "open", x = x, y = ry, w = w, h = rh })
+            end
+        end
+    end
+
+    local open_n = Memo:openCount()
+    local avail = lists_bottom - y
+    if land then
+        ------------------------------------------------ landscape: [events | to-dos]
+        local col_gap = math.floor(m * 0.03)
+        local left_w = open_n > 0 and math.floor(cw * 0.6) - col_gap or cw
+        local ev_col, ev_used, ev_rects = eventsColumn(left_w, avail)
+        local row = HorizontalGroup:new{ align = "top", ev_col }
+        addEventRects(ev_rects, pad, left_w, y)
+        if open_n > 0 then
+            local right_x = pad + left_w + 2 * col_gap + line_h
+            local right_w = W - pad - right_x
+            local td_col, td_used, td_rects = todoColumn(right_w, avail, true)
+            local col_h = math.max(ev_used, td_used)
+            -- fixed-width left column so the divider does not move with the text
+            row = HorizontalGroup:new{ align = "top",
+                LeftContainer:new{ dimen = Geom:new{ w = left_w, h = col_h }, ev_col },
+                HorizontalSpan:new{ width = col_gap },
+                LineWidget:new{ background = LIGHT, dimen = Geom:new{ w = line_h, h = col_h } },
+                HorizontalSpan:new{ width = col_gap },
+                td_col,
+            }
+            addTodoRects(td_rects, right_x, right_w, y)
+        end
+        add(HorizontalGroup:new{ align = "top", HorizontalSpan:new{ width = pad }, row }, 0)
+    else
+        ------------------------------------------------ portrait: events, then to-dos
+        -- keep room for a few to-dos; events fill the rest, to-dos take what is left
+        local todo_reserve = 0
+        if open_n > 0 then
+            todo_reserve = row_h + math.min(open_n, 3) * (row_h + row_gap) + 2 * sep_gap + line_h
+        end
+        local ev_col, ev_used, ev_rects = eventsColumn(cw, avail - todo_reserve)
+        add(HorizontalGroup:new{ align = "top", HorizontalSpan:new{ width = pad }, ev_col }, ev_used)
+        addEventRects(ev_rects, pad, cw, y - ev_used)
+        if open_n > 0 then
+            vspace(sep_gap - row_gap)
+            add(hline(cw), line_h)
+            vspace(sep_gap)
+            local td_col, td_used, td_rects = todoColumn(cw, lists_bottom - y, true)
+            add(HorizontalGroup:new{ align = "top", HorizontalSpan:new{ width = pad }, td_col }, td_used)
+            addTodoRects(td_rects, pad, cw, y - td_used)
+        end
+    end
+
     local clock_status = BottomContainer:new{
         dimen = Geom:new{ w = W, h = bottom_h },
         self:statusBar(status_px, math.floor(W * 0.9), sx, sy),
     }
-
     return OverlapGroup:new{
         dimen = Geom:new{ w = W, h = H },
-        CenterContainer:new{ dimen = Geom:new{ w = W, h = H }, main },
+        top,
         clock_status,
     }
 end
@@ -1840,6 +1990,7 @@ end
 function DeskWidget:rebuild()
     self.event_rects = {}
     self.memo_rects = {}
+    self.clock_todo_rects = {}
     self.sync_button = nil
     local W, H = Screen:getWidth(), Screen:getHeight()
     self.dimen = Geom:new{ x = 0, y = 0, w = W, h = H }
