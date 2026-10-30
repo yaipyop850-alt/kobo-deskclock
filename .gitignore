@@ -1,4 +1,9 @@
-# Never commit real calendar addresses
+# Never commit real calendar addresses or the write address/secret
 deskclock_urls.txt
 deskclock_write.txt
 *.ics
+# ...except the simulator's fictional sample data
+!tools/sim/my.ics
+!tools/sim/holiday.ics
+!tools/sim/data/deskclock_urls.txt
+tools/sim/data/deskclock_cache_*
