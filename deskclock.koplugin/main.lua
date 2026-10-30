@@ -114,8 +114,53 @@ function DeskClock:onDeskClockShowMemo()
     return true
 end
 
+--- Run `fn` once the internet is reachable, always telling the user what happens.
+-- Turns Wi-Fi on if needed and off again afterwards (only if we turned it on).
+-- (Replaces NetworkMgr:runWhenOnline, which silently drops the action when
+-- Wi-Fi is connected but the internet check fails — common right after waking.)
+function DeskClock:withOnline(label, fn, keep_wifi)
+    local msg = InfoMessage:new{ text = label .. "\n인터넷 연결 확인 중…" }
+    UIManager:show(msg)
+    UIManager:forceRePaint()
+    local turned_on = false
+    local function finish(ok, err)
+        UIManager:close(msg)
+        if ok then
+            local okc, cerr = pcall(fn)
+            if not okc then
+                UIManager:show(InfoMessage:new{ text = label .. " 중 오류:\n" .. tostring(cerr) })
+            end
+        else
+            UIManager:show(InfoMessage:new{ text = label .. " 실패:\n" .. err })
+        end
+        if turned_on and not keep_wifi then pcall(NetworkMgr.disableWifi, NetworkMgr) end
+    end
+    local tries = 0
+    local function poll()
+        tries = tries + 1
+        local connected = NetworkMgr:isConnected()
+        if connected and NetworkMgr:isOnline() then
+            finish(true)
+        elseif tries >= 120 then -- 60 s
+            finish(false, connected
+                and "Wi-Fi는 연결됐지만 인터넷(DNS)에 닿지 않습니다. 공유기 연결을 확인하세요."
+                or "Wi-Fi에 연결하지 못했습니다. 저장된 Wi-Fi 네트워크가 있는지 확인하세요.")
+        else
+            UIManager:scheduleIn(0.5, poll)
+        end
+    end
+    if not NetworkMgr:isConnected() then
+        turned_on = true
+        local ok, started = pcall(NetworkMgr.enableWifi, NetworkMgr, nil, false)
+        if not ok or started == false then
+            return finish(false, "Wi-Fi를 켜지 못했습니다.")
+        end
+    end
+    UIManager:scheduleIn(0.2, poll)
+end
+
 function DeskClock:testWrite()
-    NetworkMgr:runWhenOnline(function()
+    self:withOnline("쓰기 연결 시험", function()
         local msg = InfoMessage:new{ text = "구글 캘린더 쓰기 연결 확인 중…" }
         UIManager:show(msg)
         UIManager:forceRePaint()
@@ -135,7 +180,7 @@ function DeskClock:syncFromMenu()
         UIManager:show(InfoMessage:new{ text = "먼저 캘린더 주소를 설정해 주세요." })
         return
     end
-    NetworkMgr:runWhenOnline(function()
+    self:withOnline("캘린더 동기화", function()
         local msg = InfoMessage:new{ text = "캘린더 동기화 중…" }
         UIManager:show(msg)
         UIManager:forceRePaint()
@@ -262,7 +307,7 @@ function DeskClock:pluginDir()
 end
 
 function DeskClock:checkUpdate()
-    NetworkMgr:runWhenOnline(function()
+    self:withOnline("업데이트 확인", function()
         local msg = InfoMessage:new{ text = "업데이트 확인 중…" }
         UIManager:show(msg)
         UIManager:forceRePaint()
@@ -299,7 +344,7 @@ function DeskClock:checkUpdate()
                 })
             end,
         })
-    end)
+    end, true) -- keep Wi-Fi on: [업데이트] in the dialog downloads afterwards
 end
 
 function DeskClock:rollbackUpdate()
