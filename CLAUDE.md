@@ -24,10 +24,16 @@ Reply to the owner in Korean, polite speech (존댓말).
 - `FrameContainer` `width`/`height` only enlarge the painted background; layout uses content + padding.
   For fixed-size boxes use `WidgetContainer{dimen=...}`, `CenterContainer`/`LeftContainer` with `dimen`,
   or a `LineWidget` of the wanted size (v2.7 month-view bug).
-- Test with a simulator that mimics these semantics before shipping; render every screen
-  (clock / calendar / month × landscape / portrait, sleep, date pick, popups, sync) on several dates.
+- Test with the simulator in `tools/sim` (see `tools/README.md`) before shipping; render every screen
+  (clock / calendar / month / memo × landscape / portrait, sleep, date pick, popups, sync) on several dates,
+  and run `tools/tests/*` when touching sending, Tasks sync or network code.
+- The simulator cannot see: e-ink refresh regions (use the widget's real `getSize()` for `setDirty` areas,
+  v3.6.1), Wi-Fi/network states (`NetworkMgr:runWhenOnline` drops callbacks, v3.1), real font widths, speed.
+- Apps Script (`apps-script/Code.gs`) is not updated by the device updater: the owner pastes it by hand.
+  Never put the owner's SECRET in the repo; give a filled copy only in chat/attachment when asked.
 
 ## Privacy
 
-- Never commit real calendar URLs (`deskclock_urls.txt` is git-ignored) or real student names.
+- Never commit real calendar URLs (`deskclock_urls.txt`, `deskclock_write.txt` are git-ignored), the Apps Script
+  URL/secret, account e-mail addresses, or real student names.
   Sample data uses fictional names (학생A).
