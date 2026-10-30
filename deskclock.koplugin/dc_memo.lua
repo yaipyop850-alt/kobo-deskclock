@@ -262,8 +262,11 @@ function Memo:flush(post_url)
 end
 
 --- Connection test (GET). @return message
-function Memo:test(post_url)
-    if not post_url then return "쓰기 주소가 없습니다. KOReader 폴더에 deskclock_write.txt를 넣거나 deskclock_urls.txt에 >로 시작하는 줄을 추가하세요." end
+function Memo:test(post_url, write_path)
+    if not post_url then
+        return "쓰기 주소가 없습니다.\n\n찾아본 파일: " .. tostring(write_path or "deskclock_write.txt")
+            .. "\n\nPC 없이 넣으려면: 구글 캘린더에 제목이 쓰기 주소(https://script.google.com/…/exec?key=…)인 일정을 오늘 날짜로 만들고 [지금 동기화]를 하세요."
+    end
     local text, err = request(post_url, "GET")
     if not text then return "연결 실패: " .. tostring(err) end
     if text:match("^OK") then

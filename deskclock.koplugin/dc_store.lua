@@ -17,7 +17,7 @@ local function lfs_attr(path)
 end
 
 local CalStore = {
-    VERSION = "3.2",
+    VERSION = "3.3",
     settings_key = "deskclock",
     urls = nil,           -- cached URL list (re-read on load/sync)
     urls_source = nil,
@@ -90,6 +90,45 @@ local function readWriteFile(path)
     end
 end
 CalStore._readWriteFile = readWriteFile
+
+--- Full path for messages (KOReader's data dir is "." on Kobo).
+function CalStore:absPath(path)
+    if path:sub(1, 2) == "./" or path:sub(1, 1) ~= "/" then
+        local ok, lfs = pcall(require, "libs/libkoreader-lfs")
+        local cwd = ok and lfs.currentdir and lfs.currentdir()
+        if cwd then return cwd .. "/" .. path:gsub("^%./", "") end
+    end
+    return path
+end
+
+--- An event in the owner's own (private) calendar whose title is the Apps
+-- Script address hands that address to the device without a PC. The event is
+-- hidden from every screen. @return normalized URL or nil
+local function writeUrlFromTitle(title)
+    local u = title and title:match("(https://script%.google%.com/[%w_%-%./]+/exec[^%s]*)")
+    if not u then return nil end
+    local base, query = u:match("^([^?]+)%??(.*)$")
+    if query ~= "" then
+        -- keep the query as typed but percent-encode what may not appear raw (e.g. '@')
+        query = query:gsub("[^%w%-%._~=&%%]", function(c) return string.format("%%%02X", c:byte()) end)
+        return base .. "?" .. query
+    end
+    return base
+end
+CalStore._writeUrlFromTitle = writeUrlFromTitle
+
+function CalStore:saveWriteUrl(url)
+    if readWriteFile(self:writeFilePath()) == url then return false end
+    local f = io.open(self:writeFilePath(), "w")
+    if not f then
+        logger.warn("deskclock: cannot write", self:writeFilePath())
+        return false
+    end
+    f:write("# 구글 캘린더 일정 제목에서 자동으로 저장한 쓰기 주소 (공유 금지)\n>" .. url .. "\n")
+    f:close()
+    self.post_url, self.post_source = url, "write"
+    return true
+end
 
 -- Cache file per URL (not per line number), so reordering lines is harmless.
 local function urlHash(url)
@@ -243,6 +282,9 @@ end
 -- @return true on (at least partial) success, or false, message
 function CalStore:getPostUrl()
     self:getUrls()
+    -- re-read the separate file every time, so a file copied in later is seen
+    local w = readWriteFile(self:writeFilePath())
+    if w then self.post_url, self.post_source = w, "write" end
     return self.post_url
 end
 
@@ -304,6 +346,8 @@ function CalStore:load()
     self.min_stop = min_stop
     self.events = {}
     self.stats = { files = {}, parse_errors = 0 }
+    self.write_event_present = false
+    local write_saved = false
     for i, item in ipairs(urls) do
         local path = cachePath(item.url)
         local ok, evs, pinfo = pcall(ICS.parseFile, path, offset, min_stop)
@@ -316,11 +360,18 @@ function CalStore:load()
                 info.total = pinfo.total
                 info.calname = pinfo.calname
                 info.last_modified = pinfo.last_modified
-                info.last_summary = pinfo.last_summary
+                info.last_summary = writeUrlFromTitle(pinfo.last_summary)
+                    and "(쓰기 주소 설정 일정)" or pinfo.last_summary
                 info.last_start = pinfo.last_start
                 info.last_allday = pinfo.last_allday
             end
             for _, ev in ipairs(evs) do
+              local wurl = not item.holiday and writeUrlFromTitle(ev.summary)
+              if wurl then
+                -- a settings event, not a real one: never shown
+                self.write_event_present = true
+                if self:saveWriteUrl(wurl) then write_saved = true end
+              else
                 ev.holiday = item.holiday
                 -- D-day marker at the start of the title: "[D] 2차 지필고사"
                 local stripped = ev.summary:gsub("^%s*%[[Dd]%]%s*", "", 1)
@@ -330,6 +381,7 @@ function CalStore:load()
                     ev.summary = stripped ~= "" and stripped or "D-day"
                 end
                 table.insert(self.events, ev)
+              end
             end
         elseif not ok then
             info.error = tostring(evs)
@@ -339,6 +391,19 @@ function CalStore:load()
         table.insert(self.stats.files, info)
     end
     self.stats.parse_seconds = os.clock() - t0
+    if write_saved then
+        self.urls = nil
+        local ok_ui, UIManager = pcall(require, "ui/uimanager")
+        local ok_im, InfoMessage = pcall(require, "ui/widget/infomessage")
+        if ok_ui and ok_im then
+            UIManager:scheduleIn(1, function()
+                UIManager:show(InfoMessage:new{ text =
+                    "구글 캘린더 일정에서 쓰기 주소를 받아 저장했습니다.\n\n"
+                    .. "이제 휴대폰에서 그 일정(제목이 script.google.com 주소인 일정)을 지워도 됩니다.\n"
+                    .. "메뉴의 [구글 캘린더 쓰기 연결 시험]으로 확인하세요." })
+            end)
+        end
+    end
     self.window_start = nil
     self.dday_cache = nil
     local t1 = os.clock()

@@ -164,7 +164,7 @@ function DeskClock:testWrite()
         local msg = InfoMessage:new{ text = "구글 캘린더 쓰기 연결 확인 중…" }
         UIManager:show(msg)
         UIManager:forceRePaint()
-        local result = require("dc_memo"):test(CalStore:getPostUrl())
+        local result = require("dc_memo"):test(CalStore:getPostUrl(), CalStore:absPath(CalStore:writeFilePath()))
         UIManager:close(msg)
         UIManager:show(InfoMessage:new{ text = result })
     end)
@@ -283,6 +283,9 @@ function DeskClock:showDiagnostics()
     if pu then
         pdesc = (CalStore.post_source == "write" and "deskclock_write.txt" or "deskclock_urls.txt")
             .. (pu:match("[?&]key=[^&]+") and "" or " (key= 없음!)")
+    end
+    if CalStore.write_event_present then
+        pdesc = pdesc .. "\n  ※ 구글 캘린더에 쓰기 주소 일정이 남아 있음 — 지워도 됩니다"
     end
     table.insert(lines, "쓰기 주소: " .. pdesc
         .. string.format(" · 보낼 일정 %d건 · 메모 %d개", M:pendingCount(), #M:memos()))
