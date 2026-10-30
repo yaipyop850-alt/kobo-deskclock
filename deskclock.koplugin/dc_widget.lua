@@ -2160,40 +2160,57 @@ function TodoPopup:build()
     local btn_y = y
     y = y + btn_h + pad
 
-    local ph = y
-    local px0, py0 = math.floor((W - pw) / 2), math.floor((H - ph) / 2)
-    self.frame_rect = { x = px0, y = py0, w = pw, h = ph }
-    local slack = math.floor(item_px * 0.3)
-    for _, r in ipairs(row_rects) do
-        table.insert(self.rects, { kind = "item", id = r.id, x = px0, y = py0 + r.y, w = pw, h = r.h })
-    end
-    for _, b in ipairs(btns) do
-        table.insert(self.rects, { kind = b.kind, x = px0 + pad + b.x - slack, y = py0 + btn_y - slack,
-            w = b.w + 2 * slack, h = btn_h + 2 * slack })
-    end
-
+    local bw = math.max(3, bth + 1)
     self.frame = FrameContainer:new{
-        bordersize = math.max(3, bth + 1), radius = 0, margin = 0, padding = pad,
+        bordersize = bw, radius = 0, margin = 0, padding = pad,
         color = BLACK, background = WHITE,
         content,
     }
+    -- Use the frame's real size (content + padding + border) for the refresh
+    -- area: a region that leaves out the border is drawn into memory but not
+    -- refreshed on the e-ink panel until some later full-screen update.
+    local fs = self.frame:getSize()
+    local fx, fy = math.floor((W - fs.w) / 2), math.floor((H - fs.h) / 2)
+    self.frame_rect = { x = fx, y = fy, w = fs.w, h = fs.h }
+    local slack = math.floor(item_px * 0.3)
+    for _, r in ipairs(row_rects) do
+        table.insert(self.rects, { kind = "item", id = r.id, x = fx, y = fy + bw + r.y, w = fs.w, h = r.h })
+    end
+    for _, bt in ipairs(btns) do
+        table.insert(self.rects, { kind = bt.kind, x = fx + bw + pad + bt.x - slack, y = fy + bw + btn_y - slack,
+            w = bt.w + 2 * slack, h = btn_h + 2 * slack })
+    end
     self[1] = OverlapGroup:new{
         dimen = Geom:new{ w = W, h = H },
         CenterContainer:new{ dimen = Geom:new{ w = W, h = H }, self.frame },
     }
 end
 
+--- Screen area to refresh: the whole frame plus a small margin.
+function TodoPopup:refreshArea()
+    local r, e = self.frame_rect, 4
+    return Geom:new{ x = math.max(0, r.x - e), y = math.max(0, r.y - e), w = r.w + 2 * e, h = r.h + 2 * e }
+end
+
 function TodoPopup:repaint()
+    -- the frame can shrink (e.g. a two-line item on the last page): refresh
+    -- the old area too so no stale border is left behind
+    local old = self.frame_rect and self:refreshArea()
     self:build()
-    local r = self.frame_rect
-    UIManager:setDirty(self, function()
-        return "ui", Geom:new{ x = r.x, y = r.y, w = r.w, h = r.h }
-    end)
+    local area = self:refreshArea()
+    if old and (old.w ~= area.w or old.h ~= area.h) and self.parent then
+        -- what the old frame covered must be redrawn from the screen below;
+        -- a dirty parent also repaints this popup on top of it
+        area = area:combine(old)
+        UIManager:setDirty(self.parent, function() return "ui", area end)
+    else
+        UIManager:setDirty(self, function() return "ui", area end)
+    end
 end
 
 function TodoPopup:onShow()
-    local r = self.frame_rect
-    UIManager:setDirty(self, function() return "ui", Geom:new{ x = r.x, y = r.y, w = r.w, h = r.h } end)
+    local area = self:refreshArea()
+    UIManager:setDirty(self, function() return "ui", area end)
     return true
 end
 
