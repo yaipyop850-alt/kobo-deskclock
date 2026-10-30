@@ -1,0 +1,1447 @@
+--[[--
+Full-screen desk clock / month calendar for e-ink.
+
+Gestures:
+  tap            switch clock <-> calendar
+  tap a date     (calendar) list that date's events; tap today to go back
+  swipe left     next month (calendar)
+  swipe right    previous month (calendar)
+  swipe down     sync Google Calendar now
+  swipe up       rotate 90° (portrait <-> landscape); remembered for next time
+  long press     exit
+--]]
+
+local Blitbuffer = require("ffi/blitbuffer")
+local BottomContainer = require("ui/widget/container/bottomcontainer")
+local CenterContainer = require("ui/widget/container/centercontainer")
+local Device = require("device")
+local Font = require("ui/font")
+local FrameContainer = require("ui/widget/container/framecontainer")
+local Geom = require("ui/geometry")
+local GestureRange = require("ui/gesturerange")
+local HorizontalGroup = require("ui/widget/horizontalgroup")
+local HorizontalSpan = require("ui/widget/horizontalspan")
+local InfoMessage = require("ui/widget/infomessage")
+local InputContainer = require("ui/widget/container/inputcontainer")
+local LeftContainer = require("ui/widget/container/leftcontainer")
+local LineWidget = require("ui/widget/linewidget")
+local NetworkMgr = require("ui/network/manager")
+local OverlapGroup = require("ui/widget/overlapgroup")
+local PluginShare = require("pluginshare")
+local RightContainer = require("ui/widget/container/rightcontainer")
+local TextWidget = require("ui/widget/textwidget")
+local UIManager = require("ui/uimanager")
+local VerticalGroup = require("ui/widget/verticalgroup")
+local VerticalSpan = require("ui/widget/verticalspan")
+local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local ICS = require("dc_ics")
+local Screen = Device.screen
+
+local DAY = 86400
+local WDAY = { "일", "월", "화", "수", "목", "금", "토" }
+local BLACK, WHITE = Blitbuffer.COLOR_BLACK, Blitbuffer.COLOR_WHITE
+local GRAY = Blitbuffer.COLOR_DARK_GRAY
+local LIGHT = Blitbuffer.COLOR_LIGHT_GRAY
+
+local FULL_REFRESH_EVERY = 30   -- minutes between full (flashing) refreshes
+local SYNC_RETRY_SECONDS = 15 * 60
+
+-- Font:getFace() scales sizes by DPI; convert a wanted pixel size back.
+local function fsize(px)
+    local scale = Screen:scaleBySize(1000) / 1000
+    return math.max(8, math.floor(px / scale + 0.5))
+end
+
+local function text(str, px, opts)
+    opts = opts or {}
+    return TextWidget:new{
+        text = str,
+        face = Font:getFace("cfont", fsize(px)),
+        bold = opts.bold,
+        fgcolor = opts.color or BLACK,
+        max_width = opts.max_width,
+        padding = 0,
+    }
+end
+
+--- Split `str` into at most `maxlines` lines that fit `maxw` pixels.
+-- Breaks at a space when one is reasonably close, otherwise between characters
+-- (fine for Korean). The last line is ellipsized by TextWidget if still too long.
+local function wrapText(str, px, maxw, maxlines, opts)
+    local function width(s) return text(s, px, opts):getSize().w end
+    local lines = {}
+    local rest = str
+    while rest ~= "" and #lines < maxlines do
+        if #lines == maxlines - 1 or width(rest) <= maxw then
+            table.insert(lines, rest)
+            break
+        end
+        local chars = {}
+        for ch in rest:gmatch("[%z\1-\127\194-\244][\128-\191]*") do chars[#chars + 1] = ch end
+        -- largest n with chars[1..n] fitting
+        local lo, hi = 1, #chars
+        while lo < hi do
+            local mid = math.floor((lo + hi + 1) / 2)
+            if width(table.concat(chars, "", 1, mid)) <= maxw then lo = mid else hi = mid - 1 end
+        end
+        local n = lo
+        -- prefer breaking after a space (or '/', ',') in the last 40% of the line
+        for i = n, math.max(1, math.floor(n * 0.6)), -1 do
+            local c = chars[i]
+            if c == " " or c == "/" or c == "," or c == "_" then n = i break end
+        end
+        local line = table.concat(chars, "", 1, n):gsub("%s+$", "")
+        table.insert(lines, line)
+        rest = table.concat(chars, "", n + 1):gsub("^%s+", "")
+    end
+    local group = VerticalGroup:new{ align = "left" }
+    for _, l in ipairs(lines) do
+        table.insert(group, text(l, px, { color = opts and opts.color, bold = opts and opts.bold, max_width = maxw }))
+    end
+    return group
+end
+
+local function hm(t)
+    return os.date("!%H:%M", t)
+end
+
+local DeskWidget = InputContainer:extend{
+    name = "DeskClock",
+    store = nil,
+    ui = nil,          -- FileManager or ReaderUI that opened us (for proper rotation)
+    mode = "clock",
+    covers_fullscreen = true,
+}
+
+function DeskWidget:init()
+    self.month_offset = 0
+    self.ticks = 0
+    self.current_day = nil
+    local w, h = Screen:getWidth(), Screen:getHeight()
+    self.dimen = Geom:new{ x = 0, y = 0, w = w, h = h }
+    if Device:isTouchDevice() then
+        local full = function() return Geom:new{ x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() } end
+        self.ges_events = {
+            TapToggle = { GestureRange:new{ ges = "tap", range = full } },
+            HoldExit = { GestureRange:new{ ges = "hold", range = full } },
+            SwipeAction = { GestureRange:new{ ges = "swipe", range = full } },
+        }
+    end
+    if Device:hasKeys() then
+        self.key_events.Exit = { { "Back" } }
+    end
+    self.tick_cb = function() self:onTick() end
+    self:rebuild()
+end
+
+---------------------------------------------------------------- lifecycle
+
+--- Keep the device awake only when it makes sense:
+-- always in clock mode; in calendar mode only if "calendar_autosleep" is off.
+function DeskWidget:updateKeepAwake(force_release)
+    local s = self.store:getSettings()
+    local want = not force_release
+        and (self.mode == "clock" or s.calendar_autosleep == false)
+    if want and not self.keeping_awake then
+        self.prev_pause = PluginShare.pause_auto_suspend
+        PluginShare.pause_auto_suspend = true
+        UIManager:preventStandby()
+        self.keeping_awake = true
+    elseif not want and self.keeping_awake then
+        PluginShare.pause_auto_suspend = self.prev_pause
+        UIManager:allowStandby()
+        self.keeping_awake = false
+    end
+end
+
+-- While we are shown, make KOReader's sleep screen "leave screen as is",
+-- so the calendar we draw on suspend stays visible. Restored on close.
+local SS_KEYS = { "screensaver_type", "screensaver_show_message", "screensaver_delay" }
+
+function DeskWidget:overrideSleepScreen()
+    local s = self.store:getSettings()
+    if s.sleep_view == false or s.saved_ss then return end
+    local saved = {}
+    for _, k in ipairs(SS_KEYS) do
+        saved[k] = G_reader_settings:readSetting(k)
+        if saved[k] == nil then saved[k] = "__nil__" end
+    end
+    s.saved_ss = saved
+    self.store:save() -- persisted first, so a crash can be recovered at next start
+    G_reader_settings:saveSetting("screensaver_type", "disable")
+    G_reader_settings:saveSetting("screensaver_show_message", false)
+    G_reader_settings:saveSetting("screensaver_delay", "disable")
+end
+
+function DeskWidget.restoreSleepScreen(store)
+    local s = store:getSettings()
+    if not s.saved_ss then return end
+    for k, v in pairs(s.saved_ss) do
+        if v == "__nil__" then
+            G_reader_settings:delSetting(k)
+        else
+            G_reader_settings:saveSetting(k, v)
+        end
+    end
+    s.saved_ss = nil
+    store:save()
+end
+
+function DeskWidget:onShow()
+    self:updateKeepAwake()
+    self:overrideSleepScreen()
+    self:scheduleTick()
+    UIManager:setDirty(self, function() return "full", self.dimen end)
+    return true
+end
+
+function DeskWidget:onCloseWidget()
+    UIManager:unschedule(self.tick_cb)
+    if self.syncing then
+        UIManager:unschedule(self.sync_timeout_cb)
+        self.syncing = false
+        if self.wifi_turned_on_by_us then pcall(NetworkMgr.disableWifi, NetworkMgr) end
+    end
+    self:updateKeepAwake(true)
+    DeskWidget.restoreSleepScreen(self.store)
+    UIManager:setDirty(nil, "full")
+end
+
+-- KOReader broadcasts Suspend a few seconds before the device actually sleeps
+-- (after drawing its own sleep screen, which we set to "leave as is").
+function DeskWidget:onSuspend()
+    UIManager:unschedule(self.tick_cb)
+    if self.store:getSettings().sleep_view == false then return end
+    -- Sleep on today's view, not on a browsed month/date.
+    self.selected_day = nil
+    self.month_offset = 0
+    self.sleeping = true
+    self.sleep_time = self.store:now()
+    self:rebuild()
+    UIManager:setDirty(self, function() return "full", self.dimen end)
+    UIManager:forceRePaint()
+    if UIManager.waitForVSync then pcall(UIManager.waitForVSync, UIManager) end
+end
+
+function DeskWidget:onResume()
+    self.sleeping = false
+    -- Time has jumped while asleep: redraw everything.
+    self:refresh(true)
+    self:scheduleTick()
+end
+
+function DeskWidget:onSetDimensions(dimen)
+    self.dimen = Geom:new{ x = 0, y = 0, w = dimen.w, h = dimen.h }
+    self:refresh(true)
+end
+
+---------------------------------------------------------------- gestures
+
+local IDLE_RESET_SECONDS = 5 * 60
+
+function DeskWidget:isBrowsing()
+    return self.selected_day ~= nil or self.month_offset ~= 0
+end
+
+local function inRect(pos, r)
+    return pos and r and pos.x >= r.x and pos.x < r.x + r.w and pos.y >= r.y and pos.y < r.y + r.h
+end
+
+--- Which calendar cell (if any) holds screen position `pos`.
+function DeskWidget:dayAt(pos)
+    if not pos or not self.cell_rects then return nil end
+    for _, r in ipairs(self.cell_rects) do
+        if pos.x >= r.x and pos.x < r.x + r.w and pos.y >= r.y and pos.y < r.y + r.h then
+            return r.day
+        end
+    end
+end
+
+--- Popup with the full details of one event; tap anywhere (or wait) to close.
+function DeskWidget:showEventDetail(o, day)
+    local d = os.date("!*t", day)
+    local lines = { o.summary, "" }
+    local when = string.format("%d월 %d일 (%s)", d.month, d.day, WDAY[d.wday])
+    if o.allday then
+        local last = ICS.dayStart(math.max(o.start, o.stop - 1))
+        if last > ICS.dayStart(o.start) then
+            local s, e = os.date("!*t", o.start), os.date("!*t", last)
+            when = string.format("%d월 %d일 ~ %d월 %d일 (종일)", s.month, s.day, e.month, e.day)
+        else
+            when = when .. " 종일"
+        end
+    else
+        when = when .. " " .. hm(o.start)
+        if o.stop > o.start then
+            local same = ICS.dayStart(o.stop - 1) == ICS.dayStart(o.start)
+            when = when .. " – " .. (same and hm(o.stop) or os.date("!%m/%d %H:%M", o.stop))
+        end
+    end
+    table.insert(lines, when)
+    if o.location and o.location ~= "" then
+        table.insert(lines, "장소: " .. o.location)
+    end
+    UIManager:show(InfoMessage:new{
+        text = table.concat(lines, "\n"),
+        show_icon = false,
+        timeout = 20,
+    })
+end
+
+function DeskWidget:onTapToggle(_, ges)
+    self.last_touch = os.time()
+    local pos = ges and ges.pos
+    if not self.sleeping and inRect(pos, self.sync_button) then
+        self:syncNow()
+        return true
+    end
+    for _, r in ipairs(self.event_rects or {}) do
+        if inRect(pos, r) then
+            self:showEventDetail(r.occ, r.day)
+            return true
+        end
+    end
+    if self.mode == "month" then
+        if self:isBrowsing() and inRect(pos, self.today_button) then
+            self.month_offset = 0
+            self:refresh(false)
+            return true
+        end
+        local day = self:dayAt(pos)
+        if day then
+            self.store:ensureWindow(false, day)
+            self:showDayDetail(day)
+            return true
+        end
+    end
+    if self.mode == "calendar" then
+        if self:isBrowsing() and inRect(ges and ges.pos, self.today_button) then
+            self.selected_day = nil
+            self.month_offset = 0
+            self:refresh(false)
+            return true
+        end
+        local day = self:dayAt(ges and ges.pos)
+        if day then
+            local today = ICS.dayStart(self.store:now())
+            self.selected_day = (day ~= today) and day or nil
+            self.store:ensureWindow(false, day)
+            self:refresh(false)
+            return true
+        end
+    end
+    -- clock -> calendar + list -> full-screen month -> clock
+    local NEXT = { clock = "calendar", calendar = "month", month = "clock" }
+    self.mode = NEXT[self.mode] or "clock"
+    self.month_offset = 0
+    self.selected_day = nil
+    self.store:set("mode", self.mode)
+    self:updateKeepAwake()
+    self:refresh(true)
+    return true
+end
+
+function DeskWidget:onHoldExit()
+    UIManager:close(self)
+    return true
+end
+DeskWidget.onExit = DeskWidget.onHoldExit
+
+function DeskWidget:displayedMonthStart()
+    local td = os.date("!*t", self.store:now())
+    local mi = td.month - 1 + self.month_offset
+    return ICS.timegm(td.year + math.floor(mi / 12), mi % 12 + 1, 1)
+end
+
+function DeskWidget:onSwipeAction(_, ges)
+    self.last_touch = os.time()
+    local dir = ges and ges.direction
+    if dir == "south" then
+        self:syncNow()
+    elseif dir == "north" then
+        self:rotate()
+    elseif (self.mode == "calendar" or self.mode == "month") and (dir == "west" or dir == "east") then
+        self.month_offset = self.month_offset + (dir == "west" and 1 or -1)
+        self.store:ensureWindow(false, self:displayedMonthStart())
+        self:refresh(false)
+    end
+    return true
+end
+
+--- Rotate the whole UI by 90° clockwise and remember it.
+function DeskWidget:rotate()
+    local mode = (Screen:getRotationMode() + 1) % 4
+    self:applyRotation(mode)
+    self.store:set("rotation", mode)
+end
+
+--- Apply a rotation mode through the underlying UI, so that the file browser
+-- or the open document is laid out for the new orientation too.
+function DeskWidget:applyRotation(mode)
+    if mode == nil or mode == Screen:getRotationMode() then return end
+    local Event = require("ui/event")
+    if self.ui and self.ui.handleEvent then
+        self.ui:handleEvent(Event:new("SetRotationMode", mode))
+    end
+    if Screen:getRotationMode() ~= mode then
+        Screen:setRotationMode(mode)
+    end
+    self:refresh(true)
+end
+
+--- Sync with automatic Wi-Fi handling:
+-- (Wi-Fi off) turn on -> wait for internet -> download -> turn Wi-Fi off again.
+-- (Wi-Fi already on) just download, and leave Wi-Fi as it was.
+-- Progress is shown on the small button instead of a popup.
+local WIFI_TIMEOUT = 60      -- seconds to get connected
+local ONLINE_TRIES = 40      -- x 0.5 s waiting for DNS after connecting
+
+function DeskWidget:setSyncState(state)
+    self.sync_state = state
+    self:rebuild()
+    UIManager:setDirty(self, function() return "ui", self.dimen end)
+    UIManager:forceRePaint()
+end
+
+function DeskWidget:finishSync(ok, err, silent)
+    UIManager:unschedule(self.sync_timeout_cb)
+    if self.wifi_turned_on_by_us then
+        self.wifi_turned_on_by_us = false
+        pcall(NetworkMgr.disableWifi, NetworkMgr)
+    end
+    self.syncing = false
+    self.sync_state = nil
+    if (not ok or err) and not silent then
+        UIManager:show(InfoMessage:new{ text = err or "동기화 실패", timeout = 5 })
+    end
+    self:refresh(true)
+end
+
+function DeskWidget:syncNow(silent)
+    if self.syncing then return end
+    self.syncing = true
+    self.sync_silent = silent
+    self.last_attempt = os.time()
+
+    local function doSync()
+        if not self.syncing then return end -- timed out meanwhile
+        self:setSyncState("동기화 중")
+        UIManager:nextTick(function()
+            local ok, err = self.store:sync()
+            self:finishSync(ok, err, silent)
+        end)
+    end
+
+    local waitOnline
+    waitOnline = function(n)
+        if not self.syncing then return end
+        if NetworkMgr:isOnline() then
+            doSync()
+        elseif n < ONLINE_TRIES then
+            UIManager:scheduleIn(0.5, waitOnline, n + 1)
+        else
+            self:finishSync(false, "인터넷 연결 확인 실패(DNS) — 공유기 상태 확인", silent)
+        end
+    end
+
+    if NetworkMgr:isConnected() then
+        self.wifi_turned_on_by_us = false
+        waitOnline(0)
+        return
+    end
+
+    self:setSyncState("Wi-Fi 연결 중")
+    self.wifi_turned_on_by_us = true
+    self.sync_timeout_cb = self.sync_timeout_cb or function()
+        if self.syncing then
+            self:finishSync(false, "Wi-Fi 연결 실패 — 저장된 Wi-Fi 네트워크가 있는지 확인", self.sync_silent)
+        end
+    end
+    UIManager:scheduleIn(WIFI_TIMEOUT, self.sync_timeout_cb)
+    local started = NetworkMgr:enableWifi(function() waitOnline(0) end, false)
+    if started == false then
+        self:finishSync(false, "Wi-Fi를 켜지 못함", silent)
+    elseif started == nil then
+        -- another connection attempt is in progress: just wait for it
+        UIManager:scheduleIn(1, waitOnline, 0)
+    end
+end
+
+---------------------------------------------------------------- ticking
+
+function DeskWidget:scheduleTick()
+    UIManager:unschedule(self.tick_cb)
+    local delay = 60 - (os.time() % 60) + 0.5
+    UIManager:scheduleIn(delay, self.tick_cb)
+end
+
+function DeskWidget:maybeAutoSync()
+    if not self.store:isSyncDue() then return end
+    local now = os.time()
+    if self.last_attempt and now - self.last_attempt < SYNC_RETRY_SECONDS then return end
+    if self.syncing then return end
+    -- By default only use Wi-Fi that is already connected; with the "auto Wi-Fi"
+    -- option, turn it on just for the sync and off again afterwards.
+    if not NetworkMgr:isConnected() then
+        if self.store:getSettings().auto_wifi_sync then
+            self:syncNow(true)
+        end
+        return
+    end
+    -- Connected to Wi-Fi is not enough: DNS may not be ready yet (common on Kobo).
+    if NetworkMgr.isOnline and not NetworkMgr:isOnline() then return end
+    self.last_attempt = now
+    self.store:sync()
+end
+
+function DeskWidget:onTick()
+    -- A desk calendar should drift back to "today" when left alone.
+    if (self.selected_day or self.month_offset ~= 0)
+            and os.time() - (self.last_touch or 0) > IDLE_RESET_SECONDS then
+        self.selected_day = nil
+        self.month_offset = 0
+    end
+    self:maybeAutoSync()
+    self:refresh(false)
+    self:scheduleTick()
+end
+
+function DeskWidget:refresh(full)
+    local today = ICS.dayStart(self.store:now())
+    if self.current_day ~= today then
+        if self.current_day then
+            self.month_offset = 0
+            self.selected_day = nil
+            full = true
+        end
+        self.current_day = today
+        self.store:ensureWindow()
+    end
+    self:rebuild()
+    self.ticks = self.ticks + 1
+    if self.ticks % FULL_REFRESH_EVERY == 0 then full = true end
+    local mode = full and "full" or "ui"
+    UIManager:setDirty(self, function() return mode, self.dimen end)
+end
+
+---------------------------------------------------------------- shared bits
+
+function DeskWidget:statusText()
+    local parts = {}
+    if self.sleeping then
+        return "잠자기 중 · 전원 버튼을 누르면 깨어남"
+    end
+    local powerd = Device:getPowerDevice()
+    if powerd and powerd.getCapacity then
+        local cap = powerd:getCapacity()
+        local charging = powerd.isCharging and powerd:isCharging()
+        table.insert(parts, "배터리 " .. cap .. "%" .. (charging and " 충전 중" or ""))
+    end
+    local s = self.store:getSettings()
+    if #self.store:getUrls() == 0 then
+        table.insert(parts, "캘린더 미설정")
+    elseif s.last_sync then
+        local ls = s.last_sync + self.store:offset()
+        local same_day = ICS.dayStart(ls) == ICS.dayStart(self.store:now())
+        table.insert(parts, "동기화 " .. os.date(same_day and "!%H:%M" or "!%m/%d %H:%M", ls))
+    else
+        table.insert(parts, "동기화 전")
+    end
+    if s.last_error then
+        table.insert(parts, "오류: " .. s.last_error)
+    end
+    return table.concat(parts, "  ·  ")
+end
+
+--- Status line + a small outlined "동기화" button. Records the button's touch area.
+-- `ox, oy` = absolute top-left where the returned group will be painted.
+function DeskWidget:statusBar(px, maxw, ox, oy)
+    if self.sleeping then
+        self.sync_button = nil
+        return text(self:statusText(), px, { color = GRAY, max_width = maxw })
+    end
+    local label = self.sync_state and (self.sync_state .. "…") or "동기화"
+    local btn_text = text(label, px * 0.95, { bold = true, color = self.sync_state and GRAY or BLACK })
+    local bs = btn_text:getSize()
+    local padx, pady = math.floor(px * 0.45), math.floor(px * 0.15)
+    local button = FrameContainer:new{
+        bordersize = math.max(1, math.floor(px / 14)), radius = 0, margin = 0,
+        color = self.sync_state and GRAY or BLACK,
+        padding = 0, padding_left = padx, padding_right = padx, padding_top = pady, padding_bottom = pady,
+        background = WHITE,
+        width = bs.w + 2 * padx + 2 * math.max(1, math.floor(px / 14)),
+        height = bs.h + 2 * pady + 2 * math.max(1, math.floor(px / 14)),
+        btn_text,
+    }
+    local bsz = button:getSize()
+    local gap = math.floor(px * 0.8)
+    local status = self.sync_state and "" or self:statusText()
+    local st = text(status, px, { color = GRAY, max_width = math.max(px * 4, maxw - bsz.w - gap) })
+    local group = HorizontalGroup:new{ align = "center", st, HorizontalSpan:new{ width = gap }, button }
+    local gs = group:getSize()
+    -- generous touch area around the small button (e-ink fingers are not precise)
+    local bx = ox + st:getSize().w + gap
+    local by = oy + math.floor((gs.h - bsz.h) / 2)
+    local slack = math.floor(px * 0.6)
+    self.sync_button = { x = bx - slack, y = by - slack, w = bsz.w + 2 * slack, h = bsz.h + 2 * slack }
+    return group
+end
+
+local function ddayText(it)
+    if it.ongoing then return string.format("진행 중 %d/%d일", it.nth, it.total) end
+    return it.days_left == 0 and "D-DAY" or ("D-" .. it.days_left)
+end
+
+--- One row of D-day targets, in the chosen style ("text" or "badge").
+-- Returns nil when there is nothing to show.
+function DeskWidget:ddayRow(px, maxw, limit)
+    local items = self.store:ddays(limit)
+    if #items == 0 then return nil end
+    local style = self.store:getSettings().dday_style or "text"
+
+    local function piece(it, name_max)
+        if style == "badge" then
+            local lbl = text(ddayText(it), px * 0.85, { bold = true, color = WHITE })
+            local ls = lbl:getSize()
+            local padx, pady = math.floor(px * 0.35), math.floor(px * 0.08)
+            local badge = FrameContainer:new{
+                bordersize = 0, radius = 0, margin = 0, background = BLACK,
+                padding = 0, padding_left = padx, padding_right = padx, padding_top = pady, padding_bottom = pady,
+                width = ls.w + 2 * padx, height = ls.h + 2 * pady,
+                lbl,
+            }
+            return HorizontalGroup:new{ align = "center",
+                badge, HorizontalSpan:new{ width = math.floor(px * 0.35) },
+                text(it.summary, px, { max_width = name_max }) }
+        end
+        -- "D-45 2차 지필고사": count first (bold), then the name (gray)
+        return HorizontalGroup:new{ align = "center",
+            text(ddayText(it), px, { bold = true }),
+            HorizontalSpan:new{ width = math.floor(px * 0.35) },
+            text(it.summary, px, { color = GRAY, max_width = name_max }) }
+    end
+    local function sep()
+        return style == "badge" and HorizontalSpan:new{ width = px } or text("  ·  ", px, { color = GRAY })
+    end
+    local function build(name_max)
+        local row = HorizontalGroup:new{ align = "center" }
+        for i, it in ipairs(items) do
+            if i > 1 then table.insert(row, sep()) end
+            table.insert(row, piece(it, name_max))
+        end
+        return row
+    end
+
+    -- One line if everything fits; otherwise one D-day per line
+    -- (never drop one: the user asked for up to 2 to be shown).
+    local row = build(nil)
+    if row:getSize().w <= maxw then return row end
+    local stack = VerticalGroup:new{ align = "left" }
+    for _, it in ipairs(items) do
+        local p = piece(it, nil)
+        if p:getSize().w > maxw then
+            p = piece(it, maxw - piece(it, 1):getSize().w)
+        end
+        table.insert(stack, p)
+    end
+    return stack
+end
+
+local function dayLabel(day, today)
+    local diff = math.floor((day - today) / DAY)
+    if diff == 0 then return "오늘" end
+    if diff == 1 then return "내일" end
+    if diff == 2 then return "모레" end
+    local d = os.date("!*t", day)
+    return string.format("%d/%d(%s)", d.month, d.day, WDAY[d.wday])
+end
+
+local function eventTime(o, day)
+    if o.allday then return "종일" end
+    local day_end = day + DAY
+    if o.start < day and o.stop >= day_end then return "종일" end
+    if o.start < day then return "~" .. hm(o.stop) end
+    if o.stop > o.start and o.stop <= day_end then
+        return hm(o.start) .. "–" .. hm(o.stop)
+    end
+    return hm(o.start)
+end
+
+---------------------------------------------------------------- clock mode
+
+function DeskWidget:buildClock(W, H)
+    local store = self.store
+    local now = store:now()
+    local today = ICS.dayStart(now)
+    local d = os.date("!*t", now)
+    local m = math.min(W, H)
+
+    local time_px = math.min(H * 0.30, W / 3.0)
+    local date_px = m * 0.065
+    local ev_px = m * 0.042
+    local status_px = m * 0.028
+    local content_w = math.floor(W * 0.86)
+
+    local date_str = string.format("%d년 %d월 %d일 %s요일", d.year, d.month, d.day, WDAY[d.wday])
+    local hol = store:holidaysOnDay(today)
+    if hol then date_str = date_str .. "  ·  " .. table.concat(hol, ", ") end
+
+    local main = VerticalGroup:new{
+        align = "center",
+        text(string.format("%02d:%02d", d.hour, d.min), time_px, { bold = true }),
+        VerticalSpan:new{ width = math.floor(m * 0.01) },
+        text(date_str, date_px, { max_width = content_w }),
+    }
+    local drow = self:ddayRow(date_px * 0.62, content_w, 2)
+    if drow then
+        table.insert(main, VerticalSpan:new{ width = math.floor(m * 0.02) })
+        table.insert(main, drow)
+    end
+    for _, wdg in ipairs{
+        VerticalSpan:new{ width = math.floor(m * 0.05) },
+        LineWidget:new{ background = LIGHT, dimen = Geom:new{ w = content_w, h = math.max(1, math.floor(m * 0.003)) } },
+        VerticalSpan:new{ width = math.floor(m * 0.035) },
+    } do table.insert(main, wdg) end
+
+    local list = VerticalGroup:new{ align = "left" }
+    local clock_rows = {}
+    -- main is centered vertically, so it must leave the status bar's height free
+    -- at the bottom *and* (by symmetry) at the top.
+    local status_reserve = math.floor(status_px * 2.2) + math.floor(m * 0.03)
+    -- NOTE: never call getSize() on a group that will still receive children:
+    -- KOReader caches the layout on the first getSize() (stale layout = crash).
+    local function sumHeights(group)
+        local hsum = 0
+        for _, c in ipairs(group) do hsum = hsum + c:getSize().h end
+        return hsum
+    end
+    local list_budget = H - 2 * status_reserve - sumHeights(main)
+    local list_h = 0
+    local upcoming = store:upcoming(3, 2)
+    if #store:getUrls() == 0 then
+        table.insert(list, text("메뉴에서 구글 캘린더 주소를 설정하면 일정이 표시됩니다", ev_px * 0.8, { color = GRAY, max_width = content_w }))
+    elseif #upcoming == 0 then
+        table.insert(list, text("오늘·내일 남은 일정 없음", ev_px, { color = GRAY, max_width = content_w }))
+    else
+        for _, o in ipairs(upcoming) do
+            local oday = math.max(ICS.dayStart(o.start), today)
+            local when
+            if o.start <= now and o.stop > now and not o.allday then
+                when = "진행 중"
+            else
+                when = dayLabel(oday, today) .. " " .. eventTime(o, oday)
+            end
+            local when_w = text(when, ev_px, { bold = true })
+            local gap = math.floor(ev_px * 0.8)
+            local row = HorizontalGroup:new{
+                align = "top",
+                when_w,
+                HorizontalSpan:new{ width = gap },
+                wrapText(o.summary, ev_px, math.max(ev_px * 3, content_w - when_w:getSize().w - gap), 2),
+            }
+            -- Only as many events as fit between the date block and the status bar.
+            local need = row:getSize().h + math.floor(ev_px * 0.45)
+            if list_h + need > list_budget then break end
+            list_h = list_h + need
+            table.insert(list, row)
+            table.insert(clock_rows, { widget = row, occ = o, day = oday })
+            table.insert(list, VerticalSpan:new{ width = math.floor(ev_px * 0.45) })
+        end
+    end
+    table.insert(main, list)
+
+    -- Absolute touch areas of the event rows (main is centered on screen,
+    -- list is centered inside main, rows stacked inside list).
+    main:resetLayout()
+    list:resetLayout()
+    local ms, ls = main:getSize(), list:getSize()
+    local mx, my = math.floor((W - ms.w) / 2), math.floor((H - ms.h) / 2)
+    local ly = my
+    for i = 1, #main - 1 do ly = ly + main[i]:getSize().h end
+    local lx = mx + math.floor((ms.w - ls.w) / 2)
+    local y = ly
+    local by_widget = {}
+    for _, r in ipairs(clock_rows) do by_widget[r.widget] = r end
+    for _, child in ipairs(list) do
+        local sz = child:getSize()
+        local r = by_widget[child]
+        if r then
+            table.insert(self.event_rects, { x = 0, y = y, w = W, h = sz.h, occ = r.occ, day = r.day })
+        end
+        y = y + sz.h
+    end
+
+    -- Status bar centered at the bottom; measure first to know where it lands.
+    local bottom_h = H - math.floor(m * 0.03)
+    local probe = self:statusBar(status_px, math.floor(W * 0.9), 0, 0)
+    local ps = probe:getSize()
+    local sx, sy = math.floor((W - ps.w) / 2), bottom_h - ps.h
+    local clock_status = BottomContainer:new{
+        dimen = Geom:new{ w = W, h = bottom_h },
+        self:statusBar(status_px, math.floor(W * 0.9), sx, sy),
+    }
+
+    return OverlapGroup:new{
+        dimen = Geom:new{ w = W, h = H },
+        CenterContainer:new{ dimen = Geom:new{ w = W, h = H }, main },
+        clock_status,
+    }
+end
+
+---------------------------------------------------------------- calendar mode
+
+function DeskWidget:buildGrid(w, h, ox, oy)
+    local store = self.store
+    local now = store:now()
+    local today = ICS.dayStart(now)
+    local td = os.date("!*t", now)
+    local mi = td.month - 1 + self.month_offset
+    local year, month = td.year + math.floor(mi / 12), mi % 12 + 1
+
+    local title_h = math.floor(h * 0.12)
+    local head_h = math.floor(h * 0.07)
+    local title_px = title_h * 0.62
+
+    -- Right side of the title: the time, "as of" when asleep, or a
+    -- "back to today" button while browsing another month/date.
+    local right_widget
+    self.today_button = nil
+    if self.sleeping then
+        right_widget = text(os.date("!%m/%d %H:%M 기준", self.sleep_time or now), title_px * 0.42, { color = GRAY })
+    elseif self:isBrowsing() then
+        local label = text("◀ 오늘로", title_px * 0.5, { bold = true, color = WHITE })
+        local bsize = label:getSize()
+        local padx, pady = math.floor(title_px * 0.3), math.floor(title_px * 0.15)
+        right_widget = FrameContainer:new{
+            bordersize = 0, margin = 0, radius = 0,
+            padding = 0, padding_left = padx, padding_right = padx, padding_top = pady, padding_bottom = pady,
+            background = BLACK,
+            width = bsize.w + 2 * padx, height = bsize.h + 2 * pady,
+            label,
+        }
+        -- Generous touch target: the whole right half of the title row.
+        self.today_button = { x = (ox or 0) + math.floor(w / 2), y = oy or 0, w = math.ceil(w / 2), h = title_h }
+    else
+        right_widget = text(string.format("%02d:%02d", td.hour, td.min), title_px * 0.85)
+    end
+    local title = OverlapGroup:new{
+        dimen = Geom:new{ w = w, h = title_h },
+        LeftContainer:new{ dimen = Geom:new{ w = w, h = title_h },
+            text(string.format("%d년 %d월", year, month), title_px, { bold = true }) },
+        RightContainer:new{ dimen = Geom:new{ w = w, h = title_h }, right_widget },
+    }
+
+    local first = ICS.timegm(year, month, 1)
+    local first_wd = ICS.weekday(first)
+    local dim = ICS.daysInMonth(year, month)
+    local rows = math.ceil((first_wd + dim) / 7)
+    local cell_w = math.floor(w / 7)
+    local sep = 1
+    local cell_h = math.floor((h - title_h - head_h - sep * rows) / rows)
+
+    local grid = VerticalGroup:new{ align = "left", title }
+    local head = HorizontalGroup:new{}
+    for i = 1, 7 do
+        table.insert(head, CenterContainer:new{
+            dimen = Geom:new{ w = cell_w, h = head_h },
+            text(WDAY[i], head_h * 0.55, { color = (i == 1 or i == 7) and GRAY or BLACK, bold = true }),
+        })
+    end
+    table.insert(grid, head)
+
+    self.cell_rects = {}
+    local border = math.max(2, math.floor(cell_w * 0.03))
+
+    -- Google-Calendar-like marks (without titles):
+    --   timed event          -> dot
+    --   one all-day day      -> short bar
+    --   multi-day event      -> bar joined across the days it covers
+    -- Bars sit in up to MAX_LANES fixed lanes so a multi-day bar stays at the
+    -- same height in every cell it crosses.
+    local MAX_LANES = 2
+    local grid_start = first
+    local grid_end = first + dim * DAY
+    local spans = {}
+    for _, o in ipairs(store.occurrences or {}) do
+        local sday = ICS.dayStart(o.start)
+        local eday = ICS.dayStart(math.max(o.start, o.stop - 1))
+        if (o.allday or eday > sday) and o.stop > grid_start and o.start < grid_end then
+            table.insert(spans, { s = sday, e = eday })
+        end
+    end
+    table.sort(spans, function(a, b)
+        if a.s ~= b.s then return a.s < b.s end
+        return (a.e - a.s) > (b.e - b.s)
+    end)
+    local lane_end = {}
+    local lanes_by_day = {}   -- day -> { [lane] = span }
+    local extra_by_day = {}   -- day -> count of bar events that did not fit
+    for _, sp in ipairs(spans) do
+        local lane
+        for l = 1, MAX_LANES do
+            if not lane_end[l] or lane_end[l] < sp.s then lane = l break end
+        end
+        local d = math.max(sp.s, grid_start)
+        while d <= sp.e and d < grid_end do
+            if lane then
+                lanes_by_day[d] = lanes_by_day[d] or {}
+                lanes_by_day[d][lane] = sp
+            else
+                extra_by_day[d] = (extra_by_day[d] or 0) + 1
+            end
+            d = d + DAY
+        end
+        if lane then lane_end[lane] = sp.e end
+    end
+
+    -- Fixed vertical budget so marks line up across cells.
+    local lane_h = math.max(5, math.floor(cell_h * 0.10))
+    local thick = math.max(3, math.floor(lane_h * 0.55))
+    local dot_px = math.max(10, cell_h * 0.17)
+    local num_px = math.min(cell_h * 0.36, cell_w * 0.40)
+    local num_h = text("0", num_px):getSize().h
+    local dot_h = text("•", dot_px):getSize().h
+    local budget = math.floor(cell_h * 0.94)
+    if num_h + MAX_LANES * lane_h + dot_h > budget then
+        num_px = num_px * (budget - MAX_LANES * lane_h - dot_h) / num_h
+    end
+    local inset = math.floor(cell_w * 0.12)
+    for r = 0, rows - 1 do
+        table.insert(grid, LineWidget:new{ background = LIGHT, dimen = Geom:new{ w = cell_w * 7, h = sep } })
+        local row = HorizontalGroup:new{}
+        for c = 0, 6 do
+            local dn = r * 7 + c - first_wd + 1
+            local cell_content
+            local bg = WHITE
+            local selected = false
+            if dn >= 1 and dn <= dim then
+                local day = first + (dn - 1) * DAY
+                local is_today = day == today
+                selected = self.selected_day == day
+                table.insert(self.cell_rects, {
+                    x = (ox or 0) + c * cell_w,
+                    y = (oy or 0) + title_h + head_h + r * (sep + cell_h) + sep,
+                    w = cell_w, h = cell_h, day = day,
+                })
+                local holiday = store:holidaysOnDay(day)
+                local color = (c == 0 or c == 6 or holiday) and GRAY or BLACK
+                if is_today then
+                    bg = BLACK
+                    color = WHITE
+                end
+                local mark = is_today and WHITE or BLACK
+                local inner_w = cell_w - 2 * (selected and border or 0)
+                -- timed, single-day events -> dots (+ bar events that found no lane)
+                local ndots = extra_by_day[day] or 0
+                for _, o in ipairs(store:eventsOnDay(day)) do
+                    local sday = ICS.dayStart(o.start)
+                    local eday = ICS.dayStart(math.max(o.start, o.stop - 1))
+                    if not o.allday and eday == sday then ndots = ndots + 1 end
+                end
+                cell_content = VerticalGroup:new{
+                    align = "center",
+                    text(tostring(dn), num_px, { bold = is_today or holiday ~= nil, color = color }),
+                }
+                local lanes = lanes_by_day[day] or {}
+                for l = 1, MAX_LANES do
+                    local sp = lanes[l]
+                    if sp then
+                        -- reach the cell edge where the event continues (same week row)
+                        local left = (sp.s < day and c > 0) and 0 or inset
+                        local right = (sp.e > day and c < 6) and 0 or inset
+                        table.insert(cell_content, CenterContainer:new{
+                            dimen = Geom:new{ w = inner_w, h = lane_h },
+                            HorizontalGroup:new{
+                                align = "center",
+                                HorizontalSpan:new{ width = left },
+                                LineWidget:new{ background = mark,
+                                    dimen = Geom:new{ w = math.max(2, inner_w - left - right), h = thick } },
+                                HorizontalSpan:new{ width = right },
+                            },
+                        })
+                    else
+                        table.insert(cell_content, VerticalSpan:new{ width = lane_h })
+                    end
+                end
+                table.insert(cell_content,
+                    text(ndots > 0 and string.rep("•", math.min(ndots, 3)) or " ", dot_px, { color = mark }))
+            else
+                cell_content = VerticalSpan:new{ width = 0 }
+            end
+            local b = selected and border or 0
+            table.insert(row, FrameContainer:new{
+                bordersize = b, padding = 0, margin = 0, radius = 0,
+                color = BLACK,
+                background = bg,
+                width = cell_w, height = cell_h,
+                CenterContainer:new{ dimen = Geom:new{ w = cell_w - 2 * b, h = cell_h - 2 * b }, cell_content },
+            })
+        end
+        table.insert(grid, row)
+    end
+    return grid
+end
+
+function DeskWidget:buildList(w, h, ox, oy)
+    local store = self.store
+    local now = store:now()
+    local today = ICS.dayStart(now)
+    local m = math.min(Screen:getWidth(), Screen:getHeight())
+    local head_px = m * 0.040
+    local item_px = m * 0.034
+    local status_px = m * 0.026
+    local status_h = math.floor(status_px * 2.3)
+    -- leave room for the status bar and for the "…" line shown when the list overflows
+    local avail = h - status_h - math.floor(item_px * 1.4)
+
+    local list = VerticalGroup:new{ align = "left" }
+    local used = 0
+    local function add(widget, gap)
+        local hgt = widget:getSize().h + (gap or 0)
+        if used + hgt > avail then return false end
+        table.insert(list, widget)
+        if gap and gap > 0 then table.insert(list, VerticalSpan:new{ width = gap }) end
+        used = used + hgt
+        return true
+    end
+
+    -- Picked date > first day of a browsed month > today.
+    local base = self.selected_day
+        or (self.month_offset ~= 0 and self:displayedMonthStart())
+        or today
+
+    local drow = self:ddayRow(item_px, w, 2)
+    if drow then
+        add(drow, math.floor(item_px * 0.45))
+        add(LineWidget:new{ background = LIGHT, dimen = Geom:new{ w = w, h = 1 } }, math.floor(item_px * 0.5))
+    end
+    local full = false
+    for i = 0, 13 do
+        local day = base + i * DAY
+        local events = store:eventsOnDay(day)
+        local holiday = store:holidaysOnDay(day)
+        if i == 0 or #events > 0 or holiday then
+            local d = os.date("!*t", day)
+            local label = string.format("%d월 %d일 (%s)", d.month, d.day, WDAY[d.wday])
+            local diff = math.floor((day - today) / DAY)
+            local rel = (diff >= 0 and diff <= 2) and dayLabel(day, today) or nil
+            if rel then label = label .. "  " .. rel end
+            if holiday then label = label .. "  · " .. table.concat(holiday, ", ") end
+            if used > 0 then
+                if not add(VerticalSpan:new{ width = math.floor(item_px * 0.6) }) then full = true break end
+            end
+            if not add(text(label, head_px, { bold = true, max_width = w }), math.floor(item_px * 0.25)) then full = true break end
+            if #events == 0 then
+                if not add(text("  일정 없음", item_px, { color = GRAY, max_width = w }), math.floor(item_px * 0.2)) then full = true break end
+            end
+            for _, o in ipairs(events) do
+                local past = not o.allday and (o.stop > o.start and o.stop or o.start + 60) <= now
+                local indent = math.floor(item_px * 0.6)
+                local time_w = text(eventTime(o, day), item_px, { color = past and GRAY or BLACK, bold = not past })
+                local line = HorizontalGroup:new{
+                    align = "top",
+                    HorizontalSpan:new{ width = indent },
+                    time_w,
+                    HorizontalSpan:new{ width = indent },
+                    wrapText(o.summary, item_px, math.max(item_px * 3, w - 2 * indent - time_w:getSize().w), 2,
+                        { color = past and GRAY or BLACK }),
+                }
+                local row_y = used
+                if not add(line, math.floor(item_px * 0.2)) then full = true break end
+                table.insert(self.event_rects, {
+                    x = ox or 0, y = (oy or 0) + row_y, w = w, h = line:getSize().h,
+                    occ = o, day = day,
+                })
+            end
+            if full then break end
+        end
+    end
+    if full then
+        table.insert(list, text("  …", item_px, { color = GRAY }))
+    end
+
+    local probe = self:statusBar(status_px, w, 0, 0)
+    local ph = probe:getSize().h
+    local list_status = self:statusBar(status_px, w, ox or 0,
+        (oy or 0) + h - status_h + math.floor((status_h - ph) / 2))
+
+    return OverlapGroup:new{
+        dimen = Geom:new{ w = w, h = h },
+        list,
+        BottomContainer:new{
+            dimen = Geom:new{ w = w, h = h },
+            LeftContainer:new{ dimen = Geom:new{ w = w, h = status_h }, list_status },
+        },
+    }
+end
+
+function DeskWidget:buildCalendar(W, H)
+    local m = math.min(W, H)
+    local pad = math.floor(m * 0.04)
+    local iw, ih = W - 2 * pad, H - 2 * pad
+    local body
+    if W > H then
+        local gw = math.floor(iw * 0.50)
+        local gap = math.floor(pad * 1.2)
+        local list_x = pad + gw + gap + 1 + gap
+        body = HorizontalGroup:new{
+            align = "top",
+            self:buildGrid(gw, ih, pad, pad),
+            HorizontalSpan:new{ width = gap },
+            LineWidget:new{ background = LIGHT, dimen = Geom:new{ w = 1, h = ih } },
+            HorizontalSpan:new{ width = gap },
+            self:buildList(iw - gw - 2 * gap - 1, ih, list_x, pad),
+        }
+    else
+        local gh = math.floor(ih * 0.56)
+        local gap = math.floor(pad * 0.8)
+        local list_y = pad + gh + gap + 1 + gap
+        body = VerticalGroup:new{
+            align = "left",
+            self:buildGrid(iw, gh, pad, pad),
+            VerticalSpan:new{ width = gap },
+            LineWidget:new{ background = LIGHT, dimen = Geom:new{ w = iw, h = 1 } },
+            VerticalSpan:new{ width = gap },
+            self:buildList(iw, ih - gh - 2 * gap - 1, pad, list_y),
+        }
+    end
+    return FrameContainer:new{
+        bordersize = 0, margin = 0, padding = pad,
+        background = WHITE,
+        body,
+    }
+end
+
+---------------------------------------------------------------- full-screen month
+
+--- Popup listing everything on one day (used by the full-screen month).
+function DeskWidget:showDayDetail(day)
+    local d = os.date("!*t", day)
+    local lines = { string.format("%d월 %d일 (%s)", d.month, d.day, WDAY[d.wday]) }
+    local hol = self.store:holidaysOnDay(day)
+    if hol then lines[1] = lines[1] .. "  · " .. table.concat(hol, ", ") end
+    table.insert(lines, "")
+    local events = self.store:eventsOnDay(day)
+    if #events == 0 then
+        table.insert(lines, "일정 없음")
+    end
+    for _, o in ipairs(events) do
+        local line = eventTime(o, day) .. "   " .. o.summary
+        if o.location and o.location ~= "" then line = line .. "  (" .. o.location .. ")" end
+        table.insert(lines, line)
+    end
+    UIManager:show(InfoMessage:new{ text = table.concat(lines, "\n"), show_icon = false, timeout = 30 })
+end
+
+function DeskWidget:buildMonth(W, H)
+    local store = self.store
+    local now = store:now()
+    local today = ICS.dayStart(now)
+    local td = os.date("!*t", now)
+    local mi = td.month - 1 + self.month_offset
+    local year, month = td.year + math.floor(mi / 12), mi % 12 + 1
+    local m = math.min(W, H)
+    local landscape = W > H
+    local pad = math.floor(m * 0.022)
+
+    local title_px = m * 0.044
+    local small_px = m * 0.022
+    local ev_px = math.max(15, m * 0.0175)
+    local line_h = math.floor(ev_px * 1.45)
+
+    ------------------------------------------------ header
+    local title = text(string.format("%d년 %d월", year, month), title_px, { bold = true })
+    local title_w = title:getSize().w
+
+    -- right side: time / "기준" / [오늘로], then status + [동기화]
+    local right_left
+    self.today_button = nil
+    if self.sleeping then
+        right_left = text(os.date("!%m/%d %H:%M 기준", self.sleep_time or now), small_px, { color = GRAY })
+    elseif self:isBrowsing() then
+        local lbl = text("◀ 오늘로", small_px * 1.1, { bold = true, color = WHITE })
+        local ls = lbl:getSize()
+        local px_, py_ = math.floor(small_px * 0.5), math.floor(small_px * 0.2)
+        right_left = FrameContainer:new{
+            bordersize = 0, margin = 0, radius = 0, background = BLACK,
+            padding = 0, padding_left = px_, padding_right = px_, padding_top = py_, padding_bottom = py_,
+            width = ls.w + 2 * px_, height = ls.h + 2 * py_,
+            lbl,
+        }
+    else
+        right_left = text(string.format("%02d:%02d", td.hour, td.min), title_px * 0.8)
+    end
+    local rl = right_left:getSize()
+    local gap = math.floor(small_px * 1.2)
+    local status_max = math.floor(W * (landscape and 0.36 or 0.55))
+    local probe = self:statusBar(small_px, status_max, 0, 0)
+    local ps = probe:getSize()
+    local header_h = math.max(title:getSize().h, rl.h, ps.h)
+    local right_w = rl.w + gap + ps.w
+    local right_x = W - pad - right_w
+    local sb_x = right_x + rl.w + gap
+    local sb_y = pad + math.floor((header_h - ps.h) / 2)
+    local sbar = self:statusBar(small_px, status_max, sb_x, sb_y)
+    if self:isBrowsing() and not self.sleeping then
+        self.today_button = { x = right_x - gap, y = 0, w = rl.w + 2 * gap, h = pad + header_h + gap }
+    end
+    local right = HorizontalGroup:new{ align = "center", right_left, HorizontalSpan:new{ width = gap }, sbar }
+
+    -- D-day: beside the title in landscape, on its own line in portrait
+    local dday_line
+    local header_row
+    if landscape then
+        local dmax = W - 2 * pad - title_w - right_w - 3 * gap
+        local drow = self:ddayRow(small_px, dmax, 2)
+        if drow and drow:getSize().h > small_px * 1.8 then drow = self:ddayRow(small_px, dmax, 1) end
+        local left = HorizontalGroup:new{ align = "center", title }
+        if drow then
+            table.insert(left, HorizontalSpan:new{ width = 2 * gap })
+            table.insert(left, drow)
+        end
+        header_row = left
+    else
+        header_row = title
+        dday_line = self:ddayRow(small_px, W - 2 * pad, 2)
+    end
+    local header = OverlapGroup:new{
+        dimen = Geom:new{ w = W - 2 * pad, h = header_h },
+        LeftContainer:new{ dimen = Geom:new{ w = W - 2 * pad, h = header_h }, header_row },
+        RightContainer:new{ dimen = Geom:new{ w = W - 2 * pad, h = header_h }, right },
+    }
+    local page = VerticalGroup:new{ align = "left", header }
+    local top = pad + header_h
+    if dday_line then
+        table.insert(page, VerticalSpan:new{ width = math.floor(small_px * 0.4) })
+        table.insert(page, dday_line)
+        top = top + math.floor(small_px * 0.4) + dday_line:getSize().h
+    end
+
+    ------------------------------------------------ weekday row
+    local gw = W - 2 * pad
+    local cell_w = math.floor(gw / 7)
+    local head_h = math.floor(small_px * 1.9)
+    local head = HorizontalGroup:new{}
+    for i = 1, 7 do
+        table.insert(head, CenterContainer:new{
+            dimen = Geom:new{ w = cell_w, h = head_h },
+            text(WDAY[i], small_px, { bold = true, color = (i == 1 or i == 7) and GRAY or BLACK }),
+        })
+    end
+    table.insert(page, VerticalSpan:new{ width = math.floor(small_px * 0.5) })
+    table.insert(page, head)
+    top = top + math.floor(small_px * 0.5) + head_h
+
+    ------------------------------------------------ grid
+    local first = ICS.timegm(year, month, 1)
+    local first_wd = ICS.weekday(first)
+    local dim = ICS.daysInMonth(year, month)
+    local rows = math.ceil((first_wd + dim) / 7)
+    local sep = 1
+    local cell_h = math.floor((H - pad - top - sep * rows) / rows)
+    local num_px = math.min(small_px * 1.15, cell_h * 0.2)
+    local num_h = math.floor(text("0", num_px):getSize().h * 1.05)
+    local cell_lines = math.max(1, math.floor((cell_h - num_h - 4) / line_h))
+    local show_time = cell_w > ev_px * 8.5
+    local inset = 3
+    local bar_h = line_h - 3
+
+    -- bar-type events (all-day or spanning several days) in the month
+    local month_end = first + dim * DAY
+    local spans = {}
+    for _, o in ipairs(store.occurrences or {}) do
+        local sday = ICS.dayStart(o.start)
+        local eday = ICS.dayStart(math.max(o.start, o.stop - 1))
+        if (o.allday or eday > sday) and o.stop > first and o.start < month_end then
+            table.insert(spans, { s = sday, e = eday, title = o.summary })
+        end
+    end
+    table.sort(spans, function(a, b)
+        if a.s ~= b.s then return a.s < b.s end
+        return (a.e - a.s) > (b.e - b.s)
+    end)
+
+    self.cell_rects = {}
+    for r = 0, rows - 1 do
+        table.insert(page, LineWidget:new{ background = LIGHT, dimen = Geom:new{ w = cell_w * 7, h = sep } })
+        local week_start = first + (r * 7 - first_wd) * DAY
+        local week_end = week_start + 6 * DAY
+        -- lane assignment within this week
+        local lanes = {}      -- lane -> list of spans
+        local lane_of = {}    -- span -> lane
+        local hidden = {}     -- day -> number of bars without a lane
+        for _, sp in ipairs(spans) do
+            if sp.e >= week_start and sp.s <= week_end then
+                local placed
+                for l = 1, cell_lines do
+                    local free = true
+                    for _, other in ipairs(lanes[l] or {}) do
+                        if not (sp.e < other.s or sp.s > other.e) then free = false break end
+                    end
+                    if free then
+                        lanes[l] = lanes[l] or {}
+                        table.insert(lanes[l], sp)
+                        lane_of[sp] = l
+                        placed = true
+                        break
+                    end
+                end
+                if not placed then
+                    for dd = math.max(sp.s, week_start), math.min(sp.e, week_end), DAY do
+                        hidden[dd] = (hidden[dd] or 0) + 1
+                    end
+                end
+            end
+        end
+
+        local row = HorizontalGroup:new{ align = "top" }
+        for c = 0, 6 do
+            local day = week_start + c * DAY
+            local dn = r * 7 + c - first_wd + 1
+            local cell = VerticalGroup:new{ align = "left" }
+            if dn >= 1 and dn <= dim then
+                table.insert(self.cell_rects, {
+                    x = pad + c * cell_w,
+                    y = top + r * (cell_h + sep) + sep,
+                    w = cell_w, h = cell_h, day = day,
+                })
+                local holiday = store:holidaysOnDay(day)
+                local weekend = c == 0 or c == 6
+                local num
+                if day == today then
+                    local t_ = text(tostring(dn), num_px, { bold = true, color = WHITE })
+                    local ts = t_:getSize()
+                    local px_ = math.floor(num_px * 0.35)
+                    num = FrameContainer:new{
+                        bordersize = 0, margin = 0, radius = math.floor(ts.h / 2), background = BLACK,
+                        padding = 0, padding_left = px_, padding_right = px_,
+                        width = ts.w + 2 * px_, height = ts.h,
+                        t_,
+                    }
+                else
+                    num = text(tostring(dn), num_px, { bold = holiday ~= nil,
+                        color = (weekend or holiday) and GRAY or BLACK })
+                end
+                table.insert(cell, CenterContainer:new{ dimen = Geom:new{ w = cell_w, h = num_h }, num })
+
+                -- lines: bars in their lanes, then holiday names, then timed events
+                local used = 0
+                for l = 1, cell_lines do
+                    for _, sp in ipairs(lanes[l] or {}) do
+                        if sp.s <= day and sp.e >= day then used = l end
+                    end
+                end
+                for l = 1, used do
+                    local sp
+                    for _, cand in ipairs(lanes[l] or {}) do
+                        if cand.s <= day and cand.e >= day then sp = cand end
+                    end
+                    if sp then
+                        local left = (sp.s < day and c > 0) and 0 or inset
+                        local right = (sp.e > day and c < 6) and 0 or inset
+                        local bw = math.max(2, cell_w - left - right)
+                        local label = VerticalSpan:new{ width = 0 }
+                        if sp.s == day or c == 0 then
+                            label = text(sp.title, ev_px, { bold = true, color = WHITE, max_width = bw - 8 })
+                        end
+                        -- NOTE: FrameContainer width/height do not count in layout;
+                        -- the bar's size must come from a widget that really has it.
+                        table.insert(cell, HorizontalGroup:new{ align = "top",
+                            HorizontalSpan:new{ width = left },
+                            OverlapGroup:new{
+                                dimen = Geom:new{ w = bw, h = bar_h },
+                                LineWidget:new{ background = BLACK, dimen = Geom:new{ w = bw, h = bar_h } },
+                                LeftContainer:new{ dimen = Geom:new{ w = bw, h = bar_h },
+                                    HorizontalGroup:new{ align = "center", HorizontalSpan:new{ width = 5 }, label } },
+                            },
+                            HorizontalSpan:new{ width = right },
+                        })
+                        table.insert(cell, VerticalSpan:new{ width = line_h - bar_h })
+                    else
+                        table.insert(cell, VerticalSpan:new{ width = line_h })
+                    end
+                end
+
+                local items = {}
+                for _, name in ipairs(holiday or {}) do
+                    table.insert(items, { text = name, color = GRAY })
+                end
+                for _, o in ipairs(store:eventsOnDay(day)) do
+                    local sday = ICS.dayStart(o.start)
+                    local eday = ICS.dayStart(math.max(o.start, o.stop - 1))
+                    if not o.allday and eday == sday then
+                        table.insert(items, { text = (show_time and (hm(o.start) .. " ") or "") .. o.summary })
+                    end
+                end
+                local extra = hidden[day] or 0
+                local room = cell_lines - used
+                local n_show = #items
+                if #items + (extra > 0 and 1 or 0) > room then
+                    n_show = math.max(0, room - 1)
+                end
+                for k = 1, n_show do
+                    local it = items[k]
+                    table.insert(cell, HorizontalGroup:new{ align = "center",
+                        HorizontalSpan:new{ width = 4 },
+                        text("• " .. it.text, ev_px, { color = it.color or BLACK, max_width = cell_w - 8 }),
+                    })
+                    table.insert(cell, VerticalSpan:new{ width = math.max(0, line_h - text("•", ev_px):getSize().h) })
+                end
+                local more = (#items - n_show) + extra
+                if more > 0 and room > 0 then
+                    table.insert(cell, HorizontalGroup:new{ align = "center",
+                        HorizontalSpan:new{ width = 4 },
+                        text("+" .. more .. "개 더", ev_px, { color = GRAY }),
+                    })
+                end
+            end
+            -- fixed cell size, independent of how much is written in it
+            table.insert(row, WidgetContainer:new{
+                dimen = Geom:new{ w = cell_w, h = cell_h },
+                cell,
+            })
+        end
+        table.insert(page, row)
+    end
+
+    return FrameContainer:new{
+        bordersize = 0, margin = 0, padding = pad, padding_bottom = 0,
+        background = WHITE,
+        page,
+    }
+end
+
+---------------------------------------------------------------- assemble
+
+function DeskWidget:rebuild()
+    self.event_rects = {}
+    self.sync_button = nil
+    local W, H = Screen:getWidth(), Screen:getHeight()
+    self.dimen = Geom:new{ x = 0, y = 0, w = W, h = H }
+    local content
+    local ok, res = pcall(function()
+        -- Asleep, a frozen big clock would be misleading: always show the calendar.
+        if self.mode == "month" then
+            return self:buildMonth(W, H)
+        end
+        if self.mode == "calendar" or self.sleeping then
+            return self:buildCalendar(W, H)
+        end
+        return self:buildClock(W, H)
+    end)
+    if ok then
+        content = res
+    else
+        require("logger").err("deskclock: render error", res)
+        content = CenterContainer:new{ dimen = Geom:new{ w = W, h = H },
+            text("화면 그리기 오류: " .. tostring(res), 24, { max_width = W - 40 }) }
+    end
+    self[1] = FrameContainer:new{
+        bordersize = 0, margin = 0, padding = 0,
+        background = WHITE,
+        width = W, height = H,
+        content,
+    }
+end
+
+return DeskWidget

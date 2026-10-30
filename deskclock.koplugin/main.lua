@@ -1,0 +1,384 @@
+--[[--
+책상 시계·달력 (Desk clock & calendar) for KOReader.
+
+@module koplugin.deskclock
+--]]
+
+local Dispatcher = require("dispatcher")
+local InfoMessage = require("ui/widget/infomessage")
+local InputDialog = require("ui/widget/inputdialog")
+local NetworkMgr = require("ui/network/manager")
+local UIManager = require("ui/uimanager")
+local WidgetContainer = require("ui/widget/container/widgetcontainer")
+
+-- Our own modules must be required while the plugin loader has the plugin
+-- folder on package.path (i.e. at load time, not lazily).
+local CalStore = require("dc_store")
+local ICS = require("dc_ics")
+local DeskWidget = require("dc_widget")
+local Update = require("dc_update")
+local ConfirmBox = require("ui/widget/confirmbox")
+
+local DeskClock = WidgetContainer:extend{
+    name = "deskclock",
+    is_doc_only = false,
+}
+
+local HELP = [[
+■ 화면 조작
+· 일정 탭: 전체 제목·시간·장소 팝업(다시 탭하거나 20초 뒤 닫힘)
+· 빈 곳 탭: 시계 → 달력+목록 → 전체 달력 순서로 전환
+· 전체 달력에서 날짜 탭: 그날 일정 전체 팝업(전환은 맨 위 제목 줄을 탭)
+
+■ D-day
+구글 캘린더 일정 제목 앞에 [D]를 붙이면(예: [D] 2차 지필고사) 가까운 순으로 2개까지 "D-45 2차 지필고사"처럼 표시됩니다. 화면에는 [D]를 뺀 이름이 나옵니다.
+· 길게 누르기: 나가기
+· 아래쪽 [동기화] 버튼 또는 아래로 쓸기: Wi-Fi 켜기 → 동기화 → Wi-Fi 끄기
+· 위로 쓸기: 화면 90° 회전(가로↔세로), 다음에 열 때도 유지
+· 전원 버튼: 잠들면서 달력을 화면에 남김(잠든 동안 전력 거의 0)
+· 달력에서 좌/우로 쓸기: 다음/이전 달
+· 달력에서 날짜 탭: 그날부터 일정 보기
+· 오른쪽 위 [◀ 오늘로] 탭: 오늘로 돌아가기(5분간 손대지 않아도 자동 복귀)
+
+■ 캘린더 주소
+구글 캘린더(PC) → 설정 → 해당 캘린더 → '캘린더 통합' → 'iCal 형식의 비공개 주소'를 복사합니다.
+KOReader 폴더(.adds/koreader)에 deskclock_urls.txt 파일을 만들고 한 줄에 하나씩 붙여 넣으면 됩니다. 이 파일이 있으면 메뉴에서 입력한 주소보다 우선합니다.
+· #로 시작하는 줄은 무시
+· 주소 앞에 !를 붙이면 공휴일 캘린더로 표시
+
+■ 동기화
+Wi-Fi가 이미 연결되어 있을 때만 자동 동기화합니다(Wi-Fi를 스스로 켜지 않음).
+시계 화면이 떠 있는 동안에는 자동 절전이 멈추므로 충전기 연결을 권장합니다.]]
+
+function DeskClock:onDispatcherRegisterActions()
+    Dispatcher:registerAction("deskclock_clock", {
+        category = "none", event = "DeskClockShowClock", title = "책상 시계 열기", general = true,
+    })
+    Dispatcher:registerAction("deskclock_month", {
+        category = "none", event = "DeskClockShowMonth", title = "전체 달력 열기", general = true,
+    })
+    Dispatcher:registerAction("deskclock_calendar", {
+        category = "none", event = "DeskClockShowCalendar", title = "달력 열기", general = true,
+    })
+end
+
+function DeskClock:init()
+    -- If KOReader quit while the clock was open, put the sleep screen settings back.
+    if CalStore:getSettings().saved_ss and not DeskClock.widget_open then
+        DeskWidget.restoreSleepScreen(CalStore)
+    end
+    self:onDispatcherRegisterActions()
+    self.ui.menu:registerToMainMenu(self)
+end
+
+function DeskClock:show(mode)
+    if not CalStore.loaded then
+        CalStore:load()
+        CalStore.loaded = true
+    end
+    local widget = DeskWidget:new{
+        store = CalStore,
+        ui = self.ui,
+        mode = mode or CalStore:getSettings().mode or "clock",
+    }
+    DeskClock.widget_open = true
+    local orig_close = widget.onCloseWidget
+    widget.onCloseWidget = function(w, ...)
+        DeskClock.widget_open = false
+        return orig_close(w, ...)
+    end
+    UIManager:show(widget)
+    -- Re-open in the orientation used last time (set by swiping up).
+    local rotation = CalStore:getSettings().rotation
+    if rotation ~= nil then
+        widget:applyRotation(rotation)
+    end
+end
+
+function DeskClock:onDeskClockShowClock()
+    self:show("clock")
+    return true
+end
+
+function DeskClock:onDeskClockShowCalendar()
+    self:show("calendar")
+    return true
+end
+
+function DeskClock:onDeskClockShowMonth()
+    self:show("month")
+    return true
+end
+
+function DeskClock:syncFromMenu()
+    if #CalStore:getUrls() == 0 then
+        UIManager:show(InfoMessage:new{ text = "먼저 캘린더 주소를 설정해 주세요." })
+        return
+    end
+    NetworkMgr:runWhenOnline(function()
+        local msg = InfoMessage:new{ text = "캘린더 동기화 중…" }
+        UIManager:show(msg)
+        UIManager:forceRePaint()
+        local ok, err = CalStore:sync()
+        CalStore.loaded = true
+        UIManager:close(msg)
+        local count = #CalStore.occurrences
+        UIManager:show(InfoMessage:new{
+            text = ok and (string.format("동기화 완료 (앞뒤 기간 일정 %d건)", count) .. (err and ("\n" .. err) or ""))
+                or (err or "동기화 실패"),
+            timeout = ok and 3 or nil,
+        })
+    end)
+end
+
+function DeskClock:editUrls()
+    local _, source = CalStore:getUrls()
+    local note = source == "file"
+        and "※ deskclock_urls.txt 파일이 있어 그 내용이 우선 적용됩니다."
+        or "한 줄에 주소 하나. 공휴일 캘린더는 앞에 ! 를 붙이세요."
+    local dialog
+    dialog = InputDialog:new{
+        title = "구글 캘린더 iCal 주소",
+        description = note,
+        input = CalStore:getSettings().urls_text or "",
+        allow_newline = true,
+        fullscreen = true,
+        buttons = {{
+            {
+                text = "취소",
+                id = "close",
+                callback = function() UIManager:close(dialog) end,
+            },
+            {
+                text = "저장",
+                is_enter_default = true,
+                callback = function()
+                    CalStore:set("urls_text", dialog:getInputText())
+                    CalStore.urls = nil
+                    UIManager:close(dialog)
+                    CalStore:load()
+                    CalStore.loaded = true
+                    UIManager:show(InfoMessage:new{ text = "저장했습니다. '지금 동기화'를 실행해 주세요.", timeout = 3 })
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+function DeskClock:showDiagnostics()
+    if not CalStore.loaded then
+        CalStore:load()
+        CalStore.loaded = true
+    end
+    local Device = require("device")
+    local Screen = Device.screen
+    local s = CalStore:getSettings()
+    local urls, source = CalStore:getUrls()
+    local off = CalStore:offset()
+    local lines = {
+        "플러그인 버전: " .. CalStore.VERSION,
+        "KOReader: " .. tostring(require("version"):getCurrentRevision()),
+        string.format("화면: %d×%d, DPI %s", Screen:getWidth(), Screen:getHeight(), tostring(Screen:getDPI())),
+        "기기 시각(KST): " .. os.date("!%Y-%m-%d %H:%M:%S", os.time() + off),
+        "",
+        string.format("캘린더 주소: %d개 (%s)", #urls,
+            source == "file" and "deskclock_urls.txt" or "메뉴 입력"),
+    }
+    for _, f in ipairs(CalStore.stats.files or {}) do
+        local desc
+        if f.error then
+            desc = "읽기 오류: " .. f.error
+        elseif f.size then
+            desc = string.format("%.1f KB, 파일 속 일정 %d건 (표시 대상 %d건)",
+                f.size / 1024, f.total or 0, f.events or 0)
+            if f.calname then desc = desc .. "\n      캘린더 이름: " .. f.calname end
+            if f.last_summary then
+                local lm = f.last_modified or ""
+                local y, mo, d, h, mi = lm:match("^(%d%d%d%d)(%d%d)(%d%d)T(%d%d)(%d%d)")
+                -- LAST-MODIFIED is UTC ("...Z"): shift to local time for display.
+                local when = y and os.date("!%m/%d %H:%M", ICS.timegm(tonumber(y), tonumber(mo), tonumber(d),
+                    tonumber(h), tonumber(mi), 0) + CalStore:offset()) or lm
+                desc = desc .. string.format("\n      가장 최근 수정: %s (%s 수정, 일정일 %s)",
+                    f.last_summary, when, os.date("!%m/%d", f.last_start or 0))
+            end
+            if (f.total or 0) == 0 then
+                desc = desc .. "\n      ⚠ 일정이 하나도 없음 — 공개 주소라면 캘린더가 공개 상태가 아니거나, 다른 캘린더의 주소일 수 있음"
+            end
+        else
+            desc = "아직 받지 않음"
+        end
+        table.insert(lines, string.format("  %d번%s: %s", f.index, f.holiday and "(공휴일)" or "", desc))
+    end
+    table.insert(lines, string.format("표시 기간 일정: %d건", #CalStore.occurrences))
+    if CalStore.stats.parse_seconds then
+        table.insert(lines, string.format("처리 시간: 해석 %.1f초, 반복 전개 %.1f초",
+            CalStore.stats.parse_seconds, CalStore.stats.expand_seconds or 0))
+    end
+    table.insert(lines, "마지막 동기화: " .. (s.last_sync and os.date("!%m/%d %H:%M", s.last_sync + off) or "없음"))
+    table.insert(lines, "마지막 오류: " .. (s.last_error or "없음"))
+    table.insert(lines, "자동 동기화: " .. ((s.sync_hours or 0) > 0 and (s.sync_hours .. "시간마다") or "꺼짐"))
+    local connected = NetworkMgr:isConnected()
+    table.insert(lines, "Wi-Fi 연결: " .. (connected and "예" or "아니오"))
+    if connected and NetworkMgr.isOnline then
+        table.insert(lines, "인터넷(DNS) 확인: " .. (NetworkMgr:isOnline() and "정상" or "실패 — 공유기 인터넷 연결 확인"))
+    end
+    for i, item in ipairs(urls) do
+        local kind = item.url:match("/private%-") and "비공개 주소"
+            or (item.url:match("/public/") and "공개 주소") or "기타"
+        table.insert(lines, string.format("  %d번 주소 종류: %s", i, kind))
+    end
+    UIManager:show(InfoMessage:new{ text = table.concat(lines, "\n") })
+end
+
+function DeskClock:pluginDir()
+    if self.path then return self.path end
+    local src = debug.getinfo(1, "S").source
+    return src:match("^@(.*)/[^/]*$") or "."
+end
+
+function DeskClock:checkUpdate()
+    NetworkMgr:runWhenOnline(function()
+        local msg = InfoMessage:new{ text = "업데이트 확인 중…" }
+        UIManager:show(msg)
+        UIManager:forceRePaint()
+        local rel, err = Update.check()
+        UIManager:close(msg)
+        if not rel then
+            UIManager:show(InfoMessage:new{ text = err, timeout = 5 })
+            return
+        end
+        if not Update.isNewer(rel.version, CalStore.VERSION) then
+            UIManager:show(InfoMessage:new{
+                text = "최신 버전입니다 (v" .. CalStore.VERSION .. ")", timeout = 3 })
+            return
+        end
+        UIManager:show(ConfirmBox:new{
+            text = string.format("새 버전이 있습니다.\n\n현재 v%s → 새 버전 v%s%s\n\n업데이트할까요?",
+                CalStore.VERSION, rel.version, rel.notes and ("\n\n" .. rel.notes) or ""),
+            ok_text = "업데이트",
+            ok_callback = function()
+                local m2 = InfoMessage:new{ text = "내려받는 중…" }
+                UIManager:show(m2)
+                UIManager:forceRePaint()
+                local ok, ierr = Update.install(rel, self:pluginDir())
+                UIManager:close(m2)
+                if not ok then
+                    UIManager:show(InfoMessage:new{ text = "업데이트 실패: " .. tostring(ierr) })
+                    return
+                end
+                UIManager:show(ConfirmBox:new{
+                    text = "v" .. rel.version .. " 설치를 마쳤습니다.\nKOReader를 다시 시작하면 적용됩니다.",
+                    ok_text = "지금 재시작",
+                    cancel_text = "나중에",
+                    ok_callback = function() UIManager:restartKOReader() end,
+                })
+            end,
+        })
+    end)
+end
+
+function DeskClock:rollbackUpdate()
+    if not Update.hasBackup() then
+        UIManager:show(InfoMessage:new{ text = "되돌릴 이전 버전이 없습니다.", timeout = 3 })
+        return
+    end
+    UIManager:show(ConfirmBox:new{
+        text = "마지막 업데이트 전 버전으로 되돌릴까요?",
+        ok_text = "되돌리기",
+        ok_callback = function()
+            local ok, err = Update.rollback(self:pluginDir())
+            if not ok then
+                UIManager:show(InfoMessage:new{ text = "실패: " .. tostring(err) })
+                return
+            end
+            UIManager:show(ConfirmBox:new{
+                text = "되돌렸습니다. KOReader를 다시 시작하면 적용됩니다.",
+                ok_text = "지금 재시작", cancel_text = "나중에",
+                ok_callback = function() UIManager:restartKOReader() end,
+            })
+        end,
+    })
+end
+
+function DeskClock:addToMainMenu(menu_items)
+    local function intervalItem(hours, label)
+        return {
+            text = label,
+            radio = true,
+            checked_func = function() return (CalStore:getSettings().sync_hours or 0) == hours end,
+            callback = function() CalStore:set("sync_hours", hours) end,
+        }
+    end
+    menu_items.deskclock = {
+        text = "책상 시계·달력",
+        sorting_hint = "more_tools",
+        sub_item_table = {
+            { text = "시계 화면 열기", callback = function() self:show("clock") end },
+            { text = "달력 화면 열기", callback = function() self:show("calendar") end },
+            { text = "전체 달력 화면 열기", callback = function() self:show("month") end, separator = true },
+            { text = "지금 동기화", keep_menu_open = true, callback = function() self:syncFromMenu() end },
+            { text = "캘린더 주소 입력", keep_menu_open = true, callback = function() self:editUrls() end },
+            {
+                text = "자동 동기화 간격",
+                sub_item_table = {
+                    intervalItem(0, "자동 동기화 끄기"),
+                    intervalItem(1, "1시간"),
+                    intervalItem(3, "3시간"),
+                    intervalItem(6, "6시간"),
+                    intervalItem(12, "12시간"),
+                },
+                separator = true,
+            },
+            {
+                text = "자동 동기화 때 Wi-Fi 자동 켜고 끄기",
+                help_text = "켜 두면 자동 동기화 시각이 되었을 때 Wi-Fi가 꺼져 있어도 잠시 켜서 동기화한 뒤 다시 끕니다. 끄면 Wi-Fi가 이미 연결된 때만 자동 동기화합니다. (동기화 버튼과 아래로 쓸기는 항상 Wi-Fi를 자동으로 켜고 끕니다.)",
+                checked_func = function() return CalStore:getSettings().auto_wifi_sync == true end,
+                callback = function()
+                    CalStore:set("auto_wifi_sync", not CalStore:getSettings().auto_wifi_sync)
+                end,
+            },
+            {
+                text = "잠들 때 달력 남기기",
+                help_text = "기기가 잠들 때 KOReader 잠금 화면 대신 달력을 남겨 둡니다. 전자잉크라 잠든 동안 전원을 거의 쓰지 않습니다.",
+                checked_func = function() return CalStore:getSettings().sleep_view ~= false end,
+                callback = function()
+                    CalStore:set("sleep_view", CalStore:getSettings().sleep_view == false)
+                end,
+            },
+            {
+                text = "달력 화면에서는 자동 절전 허용",
+                help_text = "켜 두면 달력 화면에서 KOReader 자동 절전 시간이 지나면 기기가 잠들고 달력이 남습니다. 시계 화면은 항상 깨어 있습니다. 충전 중에는 잠들지 않습니다.",
+                checked_func = function() return CalStore:getSettings().calendar_autosleep ~= false end,
+                callback = function()
+                    CalStore:set("calendar_autosleep", CalStore:getSettings().calendar_autosleep == false)
+                end,
+                separator = true,
+            },
+            {
+                text = "업데이트 확인",
+                keep_menu_open = true,
+                callback = function() self:checkUpdate() end,
+            },
+            {
+                text = "이전 버전으로 되돌리기",
+                keep_menu_open = true,
+                callback = function() self:rollbackUpdate() end,
+                separator = true,
+            },
+            {
+                text = "진단 정보",
+                keep_menu_open = true,
+                callback = function() self:showDiagnostics() end,
+            },
+            {
+                text = "사용법",
+                keep_menu_open = true,
+                callback = function() UIManager:show(InfoMessage:new{ text = HELP }) end,
+            },
+        },
+    }
+end
+
+return DeskClock
