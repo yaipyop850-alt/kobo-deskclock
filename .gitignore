@@ -1,3 +1,4 @@
 # Never commit real calendar addresses
 deskclock_urls.txt
+deskclock_write.txt
 *.ics

@@ -17,7 +17,7 @@ local function lfs_attr(path)
 end
 
 local CalStore = {
-    VERSION = "3.1",
+    VERSION = "3.2",
     settings_key = "deskclock",
     urls = nil,           -- cached URL list (re-read on load/sync)
     urls_source = nil,
@@ -73,6 +73,24 @@ function CalStore:urlFilePath()
     return DataStorage:getDataDir() .. "/deskclock_urls.txt"
 end
 
+--- Optional separate file holding only the Apps Script write address, so it
+-- can be dropped in without editing deskclock_urls.txt. Overrides a '>' line.
+function CalStore:writeFilePath()
+    return DataStorage:getDataDir() .. "/deskclock_write.txt"
+end
+
+local function readWriteFile(path)
+    local f = io.open(path, "r")
+    if not f then return nil end
+    local text = f:read("*a") or ""
+    f:close()
+    for line in text:gmatch("[^\r\n]+") do
+        line = line:gsub("^%s+", ""):gsub("%s+$", ""):gsub("^>%s*", "")
+        if line:match("^https://") then return line end
+    end
+end
+CalStore._readWriteFile = readWriteFile
+
 -- Cache file per URL (not per line number), so reordering lines is harmless.
 local function urlHash(url)
     local h = 5381
@@ -125,6 +143,9 @@ function CalStore:getUrls()
             end
         end
     end
+    local w = readWriteFile(self:writeFilePath())
+    self.post_source = self.post_url and "urls" or nil
+    if w then self.post_url, self.post_source = w, "write" end
     self.urls, self.urls_source = list, source
     return list, source
 end

@@ -238,7 +238,7 @@ function Memo:flush(post_url)
     for _, it in ipairs(list) do
         if it.state ~= "sent" then
             if not post_url then
-                it.error = "쓰기 주소(>로 시작하는 줄) 미설정"
+                it.error = "쓰기 주소 미설정 (deskclock_write.txt)"
                 last_err = it.error
             else
                 local text, err = request(post_url, "POST", form{
@@ -263,7 +263,7 @@ end
 
 --- Connection test (GET). @return message
 function Memo:test(post_url)
-    if not post_url then return "쓰기 주소가 없습니다. deskclock_urls.txt에 >로 시작하는 줄을 추가하세요." end
+    if not post_url then return "쓰기 주소가 없습니다. KOReader 폴더에 deskclock_write.txt를 넣거나 deskclock_urls.txt에 >로 시작하는 줄을 추가하세요." end
     local text, err = request(post_url, "GET")
     if not text then return "연결 실패: " .. tostring(err) end
     if text:match("^OK") then

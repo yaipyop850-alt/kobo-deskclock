@@ -278,7 +278,13 @@ function DeskClock:showDiagnostics()
     end
     table.insert(lines, string.format("표시 기간 일정: %d건", #CalStore.occurrences))
     local M = require("dc_memo")
-    table.insert(lines, "쓰기 주소(>): " .. (CalStore:getPostUrl() and "설정됨" or "없음")
+    local pu = CalStore:getPostUrl()
+    local pdesc = "없음"
+    if pu then
+        pdesc = (CalStore.post_source == "write" and "deskclock_write.txt" or "deskclock_urls.txt")
+            .. (pu:match("[?&]key=[^&]+") and "" or " (key= 없음!)")
+    end
+    table.insert(lines, "쓰기 주소: " .. pdesc
         .. string.format(" · 보낼 일정 %d건 · 메모 %d개", M:pendingCount(), #M:memos()))
     if CalStore.stats.parse_seconds then
         table.insert(lines, string.format("처리 시간: 해석 %.1f초, 반복 전개 %.1f초",

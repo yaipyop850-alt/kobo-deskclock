@@ -1517,7 +1517,7 @@ function DeskWidget:queueEvent(ev)
     self:refresh(true)
     if not self.store:getPostUrl() then
         UIManager:show(InfoMessage:new{ text =
-            "일정을 기기에 저장했습니다.\n구글 캘린더로 보내려면 deskclock_urls.txt에 쓰기 주소(>로 시작하는 줄)를 추가하세요." })
+            "일정을 기기에 저장했습니다.\n구글 캘린더로 보내려면 KOReader 폴더에 deskclock_write.txt(쓰기 주소)를 넣으세요." })
         return
     end
     self:syncNow()
