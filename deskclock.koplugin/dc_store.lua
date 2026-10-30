@@ -5,6 +5,7 @@ and expanded occurrences for the desk clock / calendar screen.
 
 local DataStorage = require("datastorage")
 local ICS = require("dc_ics")
+local Memo = require("dc_memo")
 local logger = require("logger")
 
 local DAY = 86400
@@ -16,7 +17,7 @@ local function lfs_attr(path)
 end
 
 local CalStore = {
-    VERSION = "2.9",
+    VERSION = "3.0",
     settings_key = "deskclock",
     urls = nil,           -- cached URL list (re-read on load/sync)
     urls_source = nil,
@@ -104,9 +105,14 @@ function CalStore:getUrls()
         source = "menu"
     end
     local list = {}
+    self.post_url = nil
     for line in text:gmatch("[^\r\n]+") do
         line = line:gsub("^%s+", ""):gsub("%s+$", "")
-        if line ~= "" and line:sub(1, 1) ~= "#" then
+        -- ">https://script.google.com/.../exec?key=..." = where new events are sent
+        if line:sub(1, 1) == ">" then
+            local u = line:sub(2):gsub("^%s+", "")
+            if u:match("^https://") then self.post_url = u end
+        elseif line ~= "" and line:sub(1, 1) ~= "#" then
             local holiday = false
             if line:sub(1, 1) == "!" then
                 holiday = true
@@ -214,9 +220,20 @@ end
 
 --- Download all calendars and refresh the cache. Blocking.
 -- @return true on (at least partial) success, or false, message
+function CalStore:getPostUrl()
+    self:getUrls()
+    return self.post_url
+end
+
 function CalStore:sync()
     self.urls = nil -- pick up edits to deskclock_urls.txt
     local urls = self:getUrls()
+    -- 1) send events written on the device first, so the download below includes them
+    local send_err
+    if #Memo:outbox() > 0 and Memo:pendingCount() > 0 then
+        local _, err = Memo:flush(self.post_url)
+        send_err = err and ("보내기 실패: " .. err) or nil
+    end
     if #urls == 0 then
         self:set("last_error", "캘린더 주소 없음")
         return false, "등록된 캘린더 주소가 없습니다."
@@ -242,9 +259,12 @@ function CalStore:sync()
     if got > 0 then
         s.last_sync = os.time()
     end
+    if send_err then table.insert(errors, 1, send_err) end
     s.last_error = #errors > 0 and table.concat(errors, ", ") or nil
     self:save()
     self:load()
+    Memo:cleanup(self.feed_occurrences)
+    self:mergeLocal()
     if got == 0 then
         return false, "동기화 실패 (" .. s.last_error .. ")"
     end
@@ -334,7 +354,8 @@ function CalStore:ensureWindow(force, base)
         table.insert(ev.holiday and holiday or normal, ev)
     end
     local offset = self:offset()
-    self.occurrences = ICS.expand(normal, ws, we, offset)
+    self.feed_occurrences = ICS.expand(normal, ws, we, offset)
+    self.occurrences = self.feed_occurrences
     self.holiday_days = {}
     self.holiday_occurrences = ICS.expand(holiday, ws, we, offset)
     for _, o in ipairs(self.holiday_occurrences) do
@@ -347,6 +368,26 @@ function CalStore:ensureWindow(force, base)
         end
     end
     self.window_start, self.window_end = ws, we
+    self:mergeLocal()
+end
+
+--- Add device-written events that have not arrived from Google yet.
+function CalStore:mergeLocal()
+    local feed = self.feed_occurrences or {}
+    local extra = Memo:localOccurrences(feed)
+    if #extra == 0 then
+        self.occurrences = feed
+        return
+    end
+    local all = {}
+    for _, o in ipairs(feed) do all[#all + 1] = o end
+    for _, o in ipairs(extra) do all[#all + 1] = o end
+    table.sort(all, function(a, b)
+        if a.start ~= b.start then return a.start < b.start end
+        if a.allday ~= b.allday then return a.allday end
+        return a.summary < b.summary
+    end)
+    self.occurrences = all
 end
 
 --- Upcoming D-day targets (events whose title starts with [D]), nearest first.

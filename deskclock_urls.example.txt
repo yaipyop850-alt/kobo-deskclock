@@ -7,5 +7,9 @@
 #
 # https://calendar.google.com/calendar/ical/....../private-....../basic.ics
 
+# (선택) 기기에서 만든 일정을 구글 캘린더로 보내는 주소 — 맨 앞에 > 를 붙입니다.
+#   apps-script/Code.gs 를 웹 앱으로 배포한 주소 뒤에 ?key=비밀값 을 붙여 넣으세요.
+# >https://script.google.com/macros/s/……/exec?key=……
+
 # 대한민국 공휴일 (공개 캘린더)
 !https://calendar.google.com/calendar/ical/ko.south_korea%23holiday%40group.v.calendar.google.com/public/basic.ics

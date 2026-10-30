@@ -4,7 +4,8 @@ Desk clock & Google Calendar plugin for [KOReader](https://github.com/koreader/k
 
 KOReader용 책상 시계·달력 플러그인입니다.
 
-- 시계 / 달력+일정 목록 / 전체 달력 세 화면 (빈 곳 탭으로 전환)
+- 시계 / 달력+일정 목록 / 전체 달력 / 메모 네 화면 (빈 곳 탭으로 전환)
+- 메모 작성, 기기에서 만든 일정을 구글 캘린더로 전송 (`apps-script/Code.gs`)
 - 구글 캘린더 iCal 비공개 주소 연동, 반복 일정 처리
 - D-day (일정 제목 앞에 `[D]`)
 - 잠들 때 달력을 화면에 남김
@@ -16,6 +17,12 @@ KOReader용 책상 시계·달력 플러그인입니다.
 2. `deskclock_urls.example.txt`를 `.adds/koreader/deskclock_urls.txt`로 복사하고 캘린더 주소를 입력
    (**비공개 주소는 이 저장소에 올리지 마세요**)
 3. KOReader 재시작 → 메뉴 › 도구 › 책상 시계·달력
+
+## 구글 캘린더로 일정 보내기 (선택)
+
+1. script.google.com에서 새 프로젝트를 만들고 `apps-script/Code.gs` 내용을 붙여 넣은 뒤 `SECRET`을 바꿉니다.
+2. 프로젝트 설정에서 시간대를 서울로, 웹 앱(실행: 나 / 액세스: 모든 사용자)으로 배포합니다.
+3. 기기의 `deskclock_urls.txt`에 `>웹앱주소?key=SECRET값` 한 줄을 추가합니다.
 
 ## 업데이트 배포 방식
 

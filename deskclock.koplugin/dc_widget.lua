@@ -34,6 +34,7 @@ local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local Memo = require("dc_memo")
 local ICS = require("dc_ics")
 local Screen = Device.screen
 
@@ -281,6 +282,10 @@ function DeskWidget:showEventDetail(o, day)
     if o.location and o.location ~= "" then
         table.insert(lines, "장소: " .. o.location)
     end
+    if o.pending then
+        table.insert(lines, "")
+        table.insert(lines, "◇ 기기에서 추가한 일정 — 구글 캘린더 반영 전")
+    end
     UIManager:show(InfoMessage:new{
         text = table.concat(lines, "\n"),
         show_icon = false,
@@ -294,6 +299,14 @@ function DeskWidget:onTapToggle(_, ges)
     if not self.sleeping and inRect(pos, self.sync_button) then
         self:syncNow()
         return true
+    end
+    if self.mode == "memo" then
+        for _, r in ipairs(self.memo_rects or {}) do
+            if inRect(pos, r) then
+                self:onMemoItem(r)
+                return true
+            end
+        end
     end
     for _, r in ipairs(self.event_rects or {}) do
         if inRect(pos, r) then
@@ -331,7 +344,7 @@ function DeskWidget:onTapToggle(_, ges)
         end
     end
     -- clock -> calendar + list -> full-screen month -> clock
-    local NEXT = { clock = "calendar", calendar = "month", month = "clock" }
+    local NEXT = { clock = "calendar", calendar = "month", month = "memo", memo = "clock" }
     self.mode = NEXT[self.mode] or "clock"
     self.month_offset = 0
     self.selected_day = nil
@@ -341,7 +354,15 @@ function DeskWidget:onTapToggle(_, ges)
     return true
 end
 
-function DeskWidget:onHoldExit()
+function DeskWidget:onHoldExit(_, ges)
+    local pos = ges and ges.pos
+    if pos and not self.sleeping and (self.mode == "calendar" or self.mode == "month") then
+        local day = self:dayAt(pos)
+        if day then
+            self:askEventTitle(nil, day)
+            return true
+        end
+    end
     UIManager:close(self)
     return true
 end
@@ -360,6 +381,9 @@ function DeskWidget:onSwipeAction(_, ges)
         self:syncNow()
     elseif dir == "north" then
         self:rotate()
+    elseif self.mode == "memo" and (dir == "west" or dir == "east") then
+        self.memo_page = math.max(1, (self.memo_page or 1) + (dir == "west" and 1 or -1))
+        self:refresh(false)
     elseif (self.mode == "calendar" or self.mode == "month") and (dir == "west" or dir == "east") then
         self.month_offset = self.month_offset + (dir == "west" and 1 or -1)
         self.store:ensureWindow(false, self:displayedMonthStart())
@@ -1411,10 +1435,286 @@ function DeskWidget:buildMonth(W, H)
     }
 end
 
+---------------------------------------------------------------- memo screen & input
+
+local function fmtDate(day)
+    local d = os.date("!*t", day)
+    return string.format("%d/%d(%s)", d.month, d.day, WDAY[d.wday])
+end
+
+local function isoDate(day)
+    return os.date("!%Y-%m-%d", day)
+end
+
+--- Ask for a title, then (if no day given) a date, then all-day or a time;
+-- queue the event and send it right away (Wi-Fi on -> send -> sync -> off).
+function DeskWidget:askEventTitle(preset_title, day)
+    local InputDialog = require("ui/widget/inputdialog")
+    local dialog
+    dialog = InputDialog:new{
+        title = day and (fmtDate(day) .. " 일정 추가") or "일정 추가",
+        input = preset_title or "",
+        input_hint = "일정 제목",
+        buttons = {{
+            { text = "취소", id = "close", callback = function() UIManager:close(dialog) end },
+            { text = "다음", is_enter_default = true, callback = function()
+                local title = dialog:getInputText():gsub("^%s+", ""):gsub("%s+$", ""):gsub("\n", " ")
+                UIManager:close(dialog)
+                if title == "" then return end
+                if day then self:askEventTime(title, day) else self:askEventDate(title) end
+            end },
+        }},
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+function DeskWidget:askEventDate(title)
+    local DateTimeWidget = require("ui/widget/datetimewidget")
+    local t = os.date("!*t", self.store:now())
+    UIManager:show(DateTimeWidget:new{
+        year = t.year, month = t.month, day = t.day,
+        title_text = "날짜 선택", ok_text = "다음",
+        callback = function(v)
+            self:askEventTime(title, ICS.timegm(v.year, v.month, v.day))
+        end,
+    })
+end
+
+function DeskWidget:askEventTime(title, day)
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local bd
+    bd = ButtonDialog:new{
+        title = fmtDate(day) .. "  " .. title,
+        buttons = {
+            {
+                { text = "종일", callback = function()
+                    UIManager:close(bd)
+                    self:queueEvent{ title = title, date = isoDate(day) }
+                end },
+                { text = "시간 지정", callback = function()
+                    UIManager:close(bd)
+                    local DateTimeWidget = require("ui/widget/datetimewidget")
+                    UIManager:show(DateTimeWidget:new{
+                        hour = 9, min = 0,
+                        title_text = "시작 시각 (1시간 일정)", ok_text = "추가",
+                        callback = function(v)
+                            self:queueEvent{ title = title, date = isoDate(day),
+                                time = string.format("%02d:%02d", v.hour, v.min), minutes = 60 }
+                        end,
+                    })
+                end },
+            },
+            { { text = "취소", callback = function() UIManager:close(bd) end } },
+        },
+    }
+    UIManager:show(bd)
+end
+
+function DeskWidget:queueEvent(ev)
+    Memo:addEvent(ev)
+    self.store:mergeLocal()
+    self:refresh(true)
+    if not self.store:getPostUrl() then
+        UIManager:show(InfoMessage:new{ text =
+            "일정을 기기에 저장했습니다.\n구글 캘린더로 보내려면 deskclock_urls.txt에 쓰기 주소(>로 시작하는 줄)를 추가하세요." })
+        return
+    end
+    self:syncNow()
+end
+
+function DeskWidget:editMemo(m)
+    local InputDialog = require("ui/widget/inputdialog")
+    local dialog
+    dialog = InputDialog:new{
+        title = m and "메모 수정" or "메모 추가",
+        input = m and m.text or "",
+        input_hint = "메모",
+        allow_newline = true,
+        buttons = {{
+            { text = "취소", id = "close", callback = function() UIManager:close(dialog) end },
+            { text = "저장", callback = function()
+                local text = dialog:getInputText()
+                UIManager:close(dialog)
+                if m then Memo:updateMemo(m.id, text) else Memo:addMemo(text) end
+                self:refresh(true)
+            end },
+        }},
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+function DeskWidget:onMemoItem(r)
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local ConfirmBox = require("ui/widget/confirmbox")
+    if r.kind == "add_memo" then return self:editMemo(nil) end
+    if r.kind == "add_event" then return self:askEventTitle(nil, nil) end
+    local bd
+    if r.kind == "memo" then
+        local m = r.memo
+        bd = ButtonDialog:new{
+            title = m.text,
+            buttons = {
+                {
+                    { text = "수정", callback = function() UIManager:close(bd); self:editMemo(m) end },
+                    { text = "일정으로 등록", callback = function()
+                        UIManager:close(bd)
+                        self:askEventTitle(m.text:match("^[^\n]*"):sub(1, 200), nil)
+                    end },
+                },
+                {
+                    { text = "삭제", callback = function()
+                        UIManager:close(bd)
+                        UIManager:show(ConfirmBox:new{
+                            text = "이 메모를 삭제할까요?", ok_text = "삭제",
+                            ok_callback = function() Memo:deleteMemo(m.id); self:refresh(true) end,
+                        })
+                    end },
+                    { text = "닫기", callback = function() UIManager:close(bd) end },
+                },
+            },
+        }
+    elseif r.kind == "event" then
+        local it = r.item
+        local rows = {}
+        if it.state ~= "sent" then
+            table.insert(rows, { { text = "지금 보내기", callback = function()
+                UIManager:close(bd); self:syncNow() end } })
+        end
+        table.insert(rows, {
+            { text = it.state == "sent" and "목록에서 지우기" or "보내지 않고 삭제", callback = function()
+                UIManager:close(bd)
+                Memo:removeEvent(it.uid)
+                self.store:mergeLocal()
+                self:refresh(true)
+            end },
+            { text = "닫기", callback = function() UIManager:close(bd) end },
+        })
+        bd = ButtonDialog:new{ title = it.title, buttons = rows }
+    end
+    if bd then UIManager:show(bd) end
+end
+
+function DeskWidget:buildMemo(W, H)
+    local now = self.store:now()
+    local td = os.date("!*t", now)
+    local m = math.min(W, H)
+    local pad = math.floor(m * 0.03)
+    local title_px = m * 0.044
+    local small_px = m * 0.022
+    local item_px = m * 0.03
+    local cw = W - 2 * pad
+
+    ------------------------------------------------ header (same pattern as month)
+    local title = text("메모", title_px, { bold = true })
+    local time_w = text(string.format("%02d:%02d", td.hour, td.min), title_px * 0.8)
+    local gap = math.floor(small_px * 1.2)
+    local status_max = math.floor(W * 0.5)
+    local ps = self:statusBar(small_px, status_max, 0, 0):getSize()
+    local header_h = math.max(title:getSize().h, time_w:getSize().h, ps.h)
+    local right_w = time_w:getSize().w + gap + ps.w
+    local sb_x = W - pad - right_w + time_w:getSize().w + gap
+    local sbar = self:statusBar(small_px, status_max, sb_x, pad + math.floor((header_h - ps.h) / 2))
+    local header = OverlapGroup:new{
+        dimen = Geom:new{ w = cw, h = header_h },
+        LeftContainer:new{ dimen = Geom:new{ w = cw, h = header_h }, title },
+        RightContainer:new{ dimen = Geom:new{ w = cw, h = header_h },
+            HorizontalGroup:new{ align = "center", time_w, HorizontalSpan:new{ width = gap }, sbar } },
+    }
+    local page = VerticalGroup:new{ align = "left", header }
+    local y = pad + header_h
+
+    ------------------------------------------------ action buttons
+    local function button(label)
+        local t = text(label, item_px, { bold = true })
+        local ts = t:getSize()
+        local px_, py_ = math.floor(item_px * 0.6), math.floor(item_px * 0.25)
+        return FrameContainer:new{
+            bordersize = 2, margin = 0, radius = 0, color = BLACK, background = WHITE,
+            padding = 0, padding_left = px_, padding_right = px_, padding_top = py_, padding_bottom = py_,
+            t,
+        }, ts.w + 2 * px_ + 4, ts.h + 2 * py_ + 4
+    end
+    local b1, b1w, bh = button("+ 메모")
+    local b2, b2w = button("+ 일정")
+    local bgap = math.floor(item_px * 0.8)
+    y = y + math.floor(item_px * 0.7)
+    table.insert(page, VerticalSpan:new{ width = math.floor(item_px * 0.7) })
+    table.insert(page, HorizontalGroup:new{ align = "center", b1, HorizontalSpan:new{ width = bgap }, b2 })
+    local slack = math.floor(item_px * 0.4)
+    table.insert(self.memo_rects, { kind = "add_memo", x = pad - slack, y = y - slack, w = b1w + 2 * slack, h = bh + 2 * slack })
+    table.insert(self.memo_rects, { kind = "add_event", x = pad + b1w + bgap - slack, y = y - slack, w = b2w + 2 * slack, h = bh + 2 * slack })
+    y = y + bh
+
+    ------------------------------------------------ rows (outbox, then memos), paged
+    local rows = {}
+    local outbox = Memo:outbox()
+    for _, it in ipairs(outbox) do
+        local yy, mo, dd = it.date:match("^(%d+)-(%d+)-(%d+)$")
+        local day = ICS.timegm(tonumber(yy), tonumber(mo), tonumber(dd))
+        local state = it.state == "sent" and "보냄 · 구글 반영 대기"
+            or (it.error and ("보내기 실패: " .. it.error) or "보내기 대기")
+        table.insert(rows, { kind = "event", item = it,
+            main = "◇ " .. fmtDate(day) .. " " .. (it.time or "종일") .. "  " .. it.title,
+            sub = state, sub_color = (it.error and it.state ~= "sent") and BLACK or GRAY })
+    end
+    for _, mm in ipairs(Memo:memos()) do
+        -- preview: line breaks shown as " · " so a multi-line memo is not cut at its first line
+        table.insert(rows, { kind = "memo", memo = mm, main = (mm.text:gsub("%s*\n+%s*", " · ")),
+            sub = os.date("!%m/%d %H:%M", (mm.edited or mm.created) + self.store:offset()) })
+    end
+
+    local avail = H - pad - y - math.floor(item_px * 2.2)
+    local pages, cur, used = {}, {}, 0
+    local built = {}
+    for i, r in ipairs(rows) do
+        local body = wrapText(r.main, item_px, cw, r.kind == "memo" and 3 or 2)
+        local sub = text(r.sub, small_px, { color = r.sub_color or GRAY, max_width = cw })
+        local h = math.floor(item_px * 0.6) + body:getSize().h + sub:getSize().h + math.floor(item_px * 0.3) + 1
+        built[i] = { body = body, sub = sub, h = h }
+        if used + h > avail and #cur > 0 then
+            table.insert(pages, cur); cur, used = {}, 0
+        end
+        table.insert(cur, i); used = used + h
+    end
+    if #cur > 0 then table.insert(pages, cur) end
+    local npages = math.max(1, #pages)
+    self.memo_page = math.min(math.max(1, self.memo_page or 1), npages)
+
+    if #rows == 0 then
+        table.insert(page, VerticalSpan:new{ width = math.floor(item_px * 1.5) })
+        table.insert(page, text("메모가 없습니다. [+ 메모]로 추가하세요.", item_px, { color = GRAY, max_width = cw }))
+    else
+        y = y + math.floor(item_px * 0.5)
+        table.insert(page, VerticalSpan:new{ width = math.floor(item_px * 0.5) })
+        for _, i in ipairs(pages[self.memo_page] or {}) do
+            local r, b = rows[i], built[i]
+            table.insert(page, LineWidget:new{ background = LIGHT, dimen = Geom:new{ w = cw, h = 1 } })
+            table.insert(page, VerticalSpan:new{ width = math.floor(item_px * 0.6) })
+            table.insert(page, b.body)
+            table.insert(page, b.sub)
+            table.insert(page, VerticalSpan:new{ width = math.floor(item_px * 0.3) })
+            table.insert(self.memo_rects, { kind = r.kind, memo = r.memo, item = r.item,
+                x = pad, y = y, w = cw, h = b.h })
+            y = y + b.h
+        end
+    end
+
+    local footer = text(npages > 1 and string.format("%d / %d 쪽 · 좌우로 쓸어 넘기기", self.memo_page, npages)
+        or "메모를 탭하면 수정·삭제·일정 등록", small_px, { color = GRAY })
+    return OverlapGroup:new{
+        dimen = Geom:new{ w = W, h = H },
+        FrameContainer:new{ bordersize = 0, margin = 0, padding = pad, padding_bottom = 0, background = WHITE, page },
+        BottomContainer:new{ dimen = Geom:new{ w = W, h = H - pad }, footer },
+    }
+end
+
 ---------------------------------------------------------------- assemble
 
 function DeskWidget:rebuild()
     self.event_rects = {}
+    self.memo_rects = {}
     self.sync_button = nil
     local W, H = Screen:getWidth(), Screen:getHeight()
     self.dimen = Geom:new{ x = 0, y = 0, w = W, h = H }
@@ -1423,6 +1723,9 @@ function DeskWidget:rebuild()
         -- Asleep, a frozen big clock would be misleading: always show the calendar.
         if self.mode == "month" then
             return self:buildMonth(W, H)
+        end
+        if self.mode == "memo" and not self.sleeping then
+            return self:buildMemo(W, H)
         end
         if self.mode == "calendar" or self.sleeping then
             return self:buildCalendar(W, H)

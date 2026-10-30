@@ -27,12 +27,13 @@ local DeskClock = WidgetContainer:extend{
 local HELP = [[
 ■ 화면 조작
 · 일정 탭: 전체 제목·시간·장소 팝업(다시 탭하거나 20초 뒤 닫힘)
-· 빈 곳 탭: 시계 → 달력+목록 → 전체 달력 순서로 전환
+· 빈 곳 탭: 시계 → 달력+목록 → 전체 달력 → 메모 순서로 전환
+· 달력에서 날짜 칸 길게 누르기: 그 날짜에 일정 추가(구글 캘린더로 전송)
 · 전체 달력에서 날짜 탭: 그날 일정 전체 팝업(전환은 맨 위 제목 줄을 탭)
 
 ■ D-day
 구글 캘린더 일정 제목 앞에 [D]를 붙이면(예: [D] 2차 지필고사) 가까운 순으로 2개까지 "D-45 2차 지필고사"처럼 표시됩니다. 화면에는 [D]를 뺀 이름이 나옵니다.
-· 길게 누르기: 나가기
+· 길게 누르기(날짜 칸 밖): 나가기
 · 아래쪽 [동기화] 버튼 또는 아래로 쓸기: Wi-Fi 켜기 → 동기화 → Wi-Fi 끄기
 · 위로 쓸기: 화면 90° 회전(가로↔세로), 다음에 열 때도 유지
 · 전원 버튼: 잠들면서 달력을 화면에 남김(잠든 동안 전력 거의 0)
@@ -53,6 +54,9 @@ Wi-Fi가 이미 연결되어 있을 때만 자동 동기화합니다(Wi-Fi를 �
 function DeskClock:onDispatcherRegisterActions()
     Dispatcher:registerAction("deskclock_clock", {
         category = "none", event = "DeskClockShowClock", title = "책상 시계 열기", general = true,
+    })
+    Dispatcher:registerAction("deskclock_memo", {
+        category = "none", event = "DeskClockShowMemo", title = "메모 열기", general = true,
     })
     Dispatcher:registerAction("deskclock_month", {
         category = "none", event = "DeskClockShowMonth", title = "전체 달력 열기", general = true,
@@ -103,6 +107,22 @@ end
 function DeskClock:onDeskClockShowCalendar()
     self:show("calendar")
     return true
+end
+
+function DeskClock:onDeskClockShowMemo()
+    self:show("memo")
+    return true
+end
+
+function DeskClock:testWrite()
+    NetworkMgr:runWhenOnline(function()
+        local msg = InfoMessage:new{ text = "구글 캘린더 쓰기 연결 확인 중…" }
+        UIManager:show(msg)
+        UIManager:forceRePaint()
+        local result = require("dc_memo"):test(CalStore:getPostUrl())
+        UIManager:close(msg)
+        UIManager:show(InfoMessage:new{ text = result })
+    end)
 end
 
 function DeskClock:onDeskClockShowMonth()
@@ -212,6 +232,9 @@ function DeskClock:showDiagnostics()
         table.insert(lines, string.format("  %d번%s: %s", f.index, f.holiday and "(공휴일)" or "", desc))
     end
     table.insert(lines, string.format("표시 기간 일정: %d건", #CalStore.occurrences))
+    local M = require("dc_memo")
+    table.insert(lines, "쓰기 주소(>): " .. (CalStore:getPostUrl() and "설정됨" or "없음")
+        .. string.format(" · 보낼 일정 %d건 · 메모 %d개", M:pendingCount(), #M:memos()))
     if CalStore.stats.parse_seconds then
         table.insert(lines, string.format("처리 시간: 해석 %.1f초, 반복 전개 %.1f초",
             CalStore.stats.parse_seconds, CalStore.stats.expand_seconds or 0))
@@ -317,7 +340,8 @@ function DeskClock:addToMainMenu(menu_items)
         sub_item_table = {
             { text = "시계 화면 열기", callback = function() self:show("clock") end },
             { text = "달력 화면 열기", callback = function() self:show("calendar") end },
-            { text = "전체 달력 화면 열기", callback = function() self:show("month") end, separator = true },
+            { text = "전체 달력 화면 열기", callback = function() self:show("month") end },
+            { text = "메모 화면 열기", callback = function() self:show("memo") end, separator = true },
             { text = "지금 동기화", keep_menu_open = true, callback = function() self:syncFromMenu() end },
             { text = "캘린더 주소 입력", keep_menu_open = true, callback = function() self:editUrls() end },
             {
@@ -354,6 +378,12 @@ function DeskClock:addToMainMenu(menu_items)
                 callback = function()
                     CalStore:set("calendar_autosleep", CalStore:getSettings().calendar_autosleep == false)
                 end,
+                separator = true,
+            },
+            {
+                text = "구글 캘린더 쓰기 연결 시험",
+                keep_menu_open = true,
+                callback = function() self:testWrite() end,
                 separator = true,
             },
             {
