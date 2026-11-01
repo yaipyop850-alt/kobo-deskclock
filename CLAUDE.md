@@ -14,8 +14,13 @@ Reply to the owner in Korean, polite speech (존댓말).
    - Add a row to "버전별 기록" (버전 · 날짜 · 추가·수정 내용 · 계기), chronological order (oldest first).
    - Add anything considered but not adopted / dropped to "고려했으나 채택하지 않거나 폐기한 내용" with the reason.
    - Move items out of "보류 중인 개선 후보" when they are done or rejected; update "알려진 제약과 배운 점" if relevant.
-5. Also bump the version line in the install guide doc: https://claude.ai/artifact/1WnV3DUGs6DAK3dfRzAKdv
-   ("플러그인 버전: x.y" in step 5) and add/adjust usage text when behaviour changes.
+5. Keep the install & usage guide current — it must always describe the LATEST version from scratch
+   (written for a first-time user re-setting the device, incl. Apps Script and PC-less write address):
+   https://claude.ai/artifact/CsLeEXGm5WFJZSr5xeLCbM  ("설치·사용 가이드 (처음부터)").
+   Edit the affected sections in place (no "vX부터" add-ons) and update "v3.x 기준" in 개요.
+   The old guide https://claude.ai/artifact/1WnV3DUGs6DAK3dfRzAKdv is frozen (구판).
+   In-app text that points to guide steps must match the new guide's step numbers
+   (TODO next release: main.lua help_text "설치 가이드 8단계" -> "가이드 3단계").
 
 ## KOReader pitfalls already hit (do not repeat)
 
