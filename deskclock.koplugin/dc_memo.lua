@@ -485,7 +485,7 @@ function Memo:test(post_url, write_path)
         local tasks = text:match("tasks=(%S+)")
         local msg = "연결 정상\n캘린더: " .. tostring(cal) .. "\n시간대: " .. tostring(tz)
             .. "\n구글 할 일: " .. (tasks == "ok" and "연결됨"
-                or tasks and "Tasks 서비스 미추가 (가이드 8단계)"
+                or tasks and "Tasks 서비스 미추가 (가이드 3단계)"
                 or "Apps Script가 예전 코드 (할 일 동기화 안 됨)")
         if tz ~= "Asia/Seoul" then
             msg = msg .. "\n\n※ Apps Script 프로젝트 시간대를 서울로 바꾸세요 (종일 일정 날짜가 밀릴 수 있음)"

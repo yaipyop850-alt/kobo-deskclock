@@ -483,7 +483,7 @@ function DeskClock:addToMainMenu(menu_items)
             },
             {
                 text = "메모를 구글 할 일과 동기화",
-                help_text = "켜 두면 동기화할 때마다 메모 화면의 항목이 구글 '내 할 일' 목록과 양방향으로 맞춰집니다. 같은 항목을 양쪽에서 고쳤으면 기기 쪽 내용이 남습니다. Apps Script에 Tasks 서비스를 추가해야 합니다(설치 가이드 8단계).",
+                help_text = "켜 두면 동기화할 때마다 메모 화면의 항목이 구글 '내 할 일' 목록과 양방향으로 맞춰집니다. 같은 항목을 양쪽에서 고쳤으면 기기 쪽 내용이 남습니다. Apps Script에 Tasks 서비스를 추가해야 합니다(설치·사용 가이드 3단계).",
                 checked_func = function() return CalStore:getSettings().tasks_sync ~= false end,
                 callback = function()
                     CalStore:set("tasks_sync", CalStore:getSettings().tasks_sync == false)

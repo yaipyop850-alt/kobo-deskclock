@@ -1,3 +1,3 @@
-version=3.7
+version=3.7.1
 files=_meta.lua,main.lua,dc_ics.lua,dc_store.lua,dc_widget.lua,dc_update.lua,dc_memo.lua,dc_ui.lua,dc_todopopup.lua,dc_wake.lua
-notes=잠든 화면에 오늘 일정·할 일 표시, (실험) 잠든 동안 자동 동기화, 업데이트 확인에 서버 버전 표시, 코드 구조 정리
+notes=전체 달력에서 오늘 날짜를 누르면 일정 아래에 할 일도 표시

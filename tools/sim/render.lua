@@ -511,3 +511,13 @@ if os.getenv("WAKE_TEST") then
     t.cb()
     print("woken during sync: resched", table.concat(resched, ","), "sleeping", tostring(wd.sleeping))
 end
+if os.getenv("DAYPOP_TEST") then
+    -- day popup of the full-screen month: today lists open to-dos, other days do not
+    local UI = package.loaded["ui/uimanager"]
+    local shown
+    UI.show = function(_, w) shown = w.text end
+    local ICS = require("dc_ics")
+    local today = ICS.dayStart(require("dc_store"):now())
+    wd:showDayDetail(today); print("[today]\n" .. tostring(shown))
+    wd:showDayDetail(today + 86400); print("[tomorrow]\n" .. tostring(shown))
+end

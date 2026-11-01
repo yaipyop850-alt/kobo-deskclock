@@ -1338,6 +1338,24 @@ function DeskWidget:showDayDetail(day)
         if o.location and o.location ~= "" then line = line .. "  (" .. o.location .. ")" end
         table.insert(lines, line)
     end
+    -- To-dos have no date: they belong to "today", so today's popup lists them too.
+    if day == ICS.dayStart(self.store:now()) then
+        local open = {}
+        for _, m in ipairs(Memo:memos()) do
+            if not m.done then open[#open + 1] = m end
+        end
+        if #open > 0 then
+            table.insert(lines, "")
+            table.insert(lines, string.format("할 일 %d", #open))
+            for i, m in ipairs(open) do
+                if i > 12 then
+                    table.insert(lines, string.format("  …외 %d개", #open - 12))
+                    break
+                end
+                table.insert(lines, "□ " .. (m.text:gsub("%s*\n+%s*", " · ")))
+            end
+        end
+    end
     UIManager:show(InfoMessage:new{ text = table.concat(lines, "\n"), show_icon = false, timeout = 30 })
 end
 

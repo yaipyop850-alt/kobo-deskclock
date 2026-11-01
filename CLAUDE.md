@@ -19,8 +19,7 @@ Reply to the owner in Korean, polite speech (존댓말).
    https://claude.ai/artifact/CsLeEXGm5WFJZSr5xeLCbM  ("설치·사용 가이드 (처음부터)").
    Edit the affected sections in place (no "vX부터" add-ons) and update "v3.x 기준" in 개요.
    The old guide https://claude.ai/artifact/1WnV3DUGs6DAK3dfRzAKdv is frozen (구판).
-   In-app text that points to guide steps must match the new guide's step numbers
-   (TODO next release: main.lua help_text "설치 가이드 8단계" -> "가이드 3단계").
+   In-app text that points to guide steps must match the new guide's step numbers.
 
 ## KOReader pitfalls already hit (do not repeat)
 
