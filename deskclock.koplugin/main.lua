@@ -457,6 +457,8 @@ function DeskClock:addToMainMenu(menu_items)
                     wakeItem(1, "1시간마다"),
                     wakeItem(3, "3시간마다"),
                     wakeItem(6, "6시간마다"),
+                    wakeItem(8, "8시간마다"),
+                    wakeItem(12, "12시간마다"),
                 },
             },
             {

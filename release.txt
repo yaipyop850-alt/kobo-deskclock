@@ -1,3 +1,3 @@
-version=3.7.1
+version=3.7.2
 files=_meta.lua,main.lua,dc_ics.lua,dc_store.lua,dc_widget.lua,dc_update.lua,dc_memo.lua,dc_ui.lua,dc_todopopup.lua,dc_wake.lua
-notes=전체 달력에서 오늘 날짜를 누르면 일정 아래에 할 일도 표시
+notes=잠든 동안 자동 동기화 간격에 8시간·12시간 추가
