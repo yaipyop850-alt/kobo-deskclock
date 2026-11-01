@@ -32,6 +32,14 @@ Reply to the owner in Korean, polite speech (존댓말).
 - Apps Script (`apps-script/Code.gs`) is not updated by the device updater: the owner pastes it by hand.
   Never put the owner's SECRET in the repo; give a filled copy only in chat/attachment when asked.
 
+## Code layout
+
+- `dc_widget.lua` screens · `dc_ui.lua` shared drawing helpers (text, wrapText, checkbox, todoRows, colours)
+- `dc_todopopup.lua` to-do popup · `dc_wake.lua` timed wake-ups (KOReader `Device.wakeup_mgr`, Kobo only)
+- `dc_store.lua` settings/calendars/sync · `dc_memo.lua` memos, outbox, Google Tasks · `dc_ics.lua` iCal parser
+- `dc_update.lua` self-update · `main.lua` menu, dispatcher, diagnostics
+- New plugin files must be added to `files=` in `release.txt`, or devices will not get them.
+
 ## Privacy
 
 - Never commit real calendar URLs (`deskclock_urls.txt`, `deskclock_write.txt` are git-ignored), the Apps Script

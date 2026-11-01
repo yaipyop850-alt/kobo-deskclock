@@ -45,6 +45,10 @@ local HELP = [[
 · [완료 지우기]: 완료 항목을 한꺼번에 삭제
 · 구글 '내 할 일'과 동기화(메뉴에서 켜고 끔): 동기화할 때마다 양쪽을 맞추며, 양쪽에서 같은 항목을 고쳤으면 기기 쪽이 남습니다.
 
+■ 잠든 화면
+· 달력 + 오늘부터의 일정 + 안 한 할 일
+· (실험) 메뉴 '잠든 동안 자동 동기화'를 켜면 정해 둔 간격마다 잠시 깨어나 동기화하고 잠든 화면을 새로 그린 뒤 다시 잠듭니다.
+
 ■ D-day
 구글 캘린더 일정 제목 앞에 [D]를 붙이면(예: [D] 2차 지필고사) 가까운 순으로 2개까지 "D-45 2차 지필고사"처럼 표시됩니다. 화면에는 [D]를 뺀 이름이 나옵니다.
 
@@ -240,6 +244,7 @@ function DeskClock:editUrls()
 end
 
 function DeskClock:showDiagnostics()
+    local Wake = require("dc_wake")
     if not CalStore.loaded then
         CalStore:load()
         CalStore.loaded = true
@@ -285,6 +290,15 @@ function DeskClock:showDiagnostics()
     end
     table.insert(lines, string.format("표시 기간 일정: %d건", #CalStore.occurrences))
     local M = require("dc_memo")
+    do
+        local wh = s.wake_hours or 0
+        table.insert(lines, "잠든 동안 자동 동기화: " .. (wh > 0 and (wh .. "시간마다") or "끔")
+            .. (Wake.supported() and "" or " (이 기기에서 지원 안 됨)"))
+        for i, l in ipairs(s.wake_log or {}) do
+            if i > 5 then break end
+            table.insert(lines, "  " .. l)
+        end
+    end
     local pu = CalStore:getPostUrl()
     local pdesc = "없음"
     if pu then
@@ -335,7 +349,8 @@ function DeskClock:checkUpdate()
         end
         if not Update.isNewer(rel.version, CalStore.VERSION) then
             UIManager:show(InfoMessage:new{
-                text = "최신 버전입니다 (v" .. CalStore.VERSION .. ")", timeout = 3 })
+                text = string.format("최신 버전입니다\n기기 v%s · 서버 v%s\n(방금 올라온 버전은 서버 반영에 최대 5분 걸릴 수 있습니다)",
+                    CalStore.VERSION, tostring(rel.version)), timeout = 5 })
             return
         end
         UIManager:show(ConfirmBox:new{
@@ -395,6 +410,16 @@ function DeskClock:addToMainMenu(menu_items)
             callback = function() CalStore:set("sync_hours", hours) end,
         }
     end
+    local Wake = require("dc_wake")
+    local function wakeItem(hours, label)
+        return {
+            text = label,
+            radio = true,
+            enabled_func = function() return hours == 0 or Wake.supported() end,
+            checked_func = function() return (CalStore:getSettings().wake_hours or 0) == hours end,
+            callback = function() CalStore:set("wake_hours", hours) end,
+        }
+    end
     menu_items.deskclock = {
         text = "책상 시계·달력",
         sorting_hint = "more_tools",
@@ -423,6 +448,16 @@ function DeskClock:addToMainMenu(menu_items)
                 callback = function()
                     CalStore:set("auto_wifi_sync", not CalStore:getSettings().auto_wifi_sync)
                 end,
+            },
+            {
+                text = "잠든 동안 자동 동기화 (실험)",
+                help_text = "잠든 기기를 정해 둔 간격마다 잠시 깨워 Wi-Fi 켜기 → 동기화 → 잠든 화면(달력·오늘 일정·할 일) 새로 그리기 → 다시 잠들기를 합니다. 한 번에 1분 안팎 깨어 있고, 최대 2분 30초가 지나면 무조건 다시 잠듭니다. 배터리가 20% 아래(충전 중 아님)면 멈춥니다. 전원 버튼으로 깨우면 예약이 취소되고, 다시 잠들 때 새로 예약됩니다. '잠들 때 달력 남기기'가 켜져 있어야 동작합니다. 기록은 진단 정보에서 볼 수 있습니다.",
+                sub_item_table = {
+                    wakeItem(0, "끄기"),
+                    wakeItem(1, "1시간마다"),
+                    wakeItem(3, "3시간마다"),
+                    wakeItem(6, "6시간마다"),
+                },
             },
             {
                 text = "잠들 때 달력 남기기",

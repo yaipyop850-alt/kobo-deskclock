@@ -456,3 +456,58 @@ if os.getenv("CLOCK_TAP") then
     wd:onTapToggle(nil, { pos = { x = o.x + 100, y = o.y + o.h / 2 } })
     print("tap todo text -> mode", wd.mode)
 end
+if os.getenv("WAKE_TEST") then
+    -- simulate KOReader's RTC wake-up flow on Kobo
+    local Dev = package.loaded["device"]
+    local UI = package.loaded["ui/uimanager"]
+    local NM = package.loaded["ui/network/manager"]
+    local tasks, resched, log = {}, {}, {}
+    Dev.isKobo = function() return true end
+    Dev.wakeup_mgr = {
+        addTask = function(_, sec, cb) tasks[#tasks + 1] = { sec = sec, cb = cb } end,
+        removeTasks = function(_, _, cb)
+            for i = #tasks, 1, -1 do if tasks[i].cb == cb then table.remove(tasks, i) end end
+        end,
+    }
+    Dev.rescheduleSuspend = function(_, t) resched[#resched + 1] = t end
+    local cap, charging = 82, false
+    Dev.getPowerDevice = function() return { getCapacity = function() return cap end, isCharging = function() return charging end } end
+    UI.nextTick = function(_, f) f() end
+    UI.scheduleIn = function() end
+    UI.unschedule = function() end
+    UI.setDirty = function() end
+    UI.forceRePaint = function() end
+    NM.isConnected = function() return true end
+    NM.isOnline = function() return true end
+    local Store = require("dc_store")
+    local synced = 0
+    Store.sync = function() synced = synced + 1 return true end
+    Store:getSettings().wake_hours = 3
+    Store:getSettings().sleep_view = true
+    wd:onSuspend()
+    print("armed tasks:", #tasks, tasks[1] and tasks[1].sec, "status:", wd:statusText())
+    -- alarm fires: KOReader runs the task callback
+    local t = table.remove(tasks, 1)
+    t.cb()
+    print("after wake: synced", synced, "re-armed", #tasks, "reschedule", table.concat(resched, ","))
+    print("log:", Store:getSettings().wake_log[1])
+    -- user presses power: resume cancels the next alarm
+    wd:onResume()
+    print("after resume: tasks", #tasks, "next_wake", tostring(wd.next_wake))
+    -- low battery: no arming
+    cap = 10
+    wd:onSuspend()
+    print("low battery: tasks", #tasks, "log:", Store:getSettings().wake_log[1])
+    -- battery drops during the chain: wake stops, no re-arm
+    cap = 82; wd:onResume(); wd:onSuspend(); t = table.remove(tasks, 1); cap = 15; resched = {}
+    t.cb()
+    print("drop during chain: tasks", #tasks, "synced", synced, "resched", #resched, "log:", Store:getSettings().wake_log[1])
+    -- disabled
+    cap = 82; wd:onResume(); Store:getSettings().wake_hours = 0; wd:onSuspend()
+    print("disabled: tasks", #tasks)
+    -- user wakes the device while a wake-up sync is running: no forced re-suspend
+    Store:getSettings().wake_hours = 1; wd:onResume(); wd:onSuspend(); t = table.remove(tasks, 1); resched = {}
+    Store.sync = function() wd:onResume() return true end
+    t.cb()
+    print("woken during sync: resched", table.concat(resched, ","), "sleeping", tostring(wd.sleeping))
+end

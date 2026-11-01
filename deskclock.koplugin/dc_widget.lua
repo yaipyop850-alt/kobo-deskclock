@@ -35,6 +35,7 @@ local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local Memo = require("dc_memo")
+local Wake = require("dc_wake")
 local ICS = require("dc_ics")
 local Screen = Device.screen
 
@@ -47,73 +48,8 @@ local LIGHT = Blitbuffer.COLOR_LIGHT_GRAY
 local FULL_REFRESH_EVERY = 30   -- minutes between full (flashing) refreshes
 local SYNC_RETRY_SECONDS = 15 * 60
 
--- Font:getFace() scales sizes by DPI; convert a wanted pixel size back.
-local function fsize(px)
-    local scale = Screen:scaleBySize(1000) / 1000
-    return math.max(8, math.floor(px / scale + 0.5))
-end
-
-local function text(str, px, opts)
-    opts = opts or {}
-    return TextWidget:new{
-        text = str,
-        face = Font:getFace("cfont", fsize(px)),
-        bold = opts.bold,
-        fgcolor = opts.color or BLACK,
-        max_width = opts.max_width,
-        padding = 0,
-    }
-end
-
---- Split `str` into at most `maxlines` lines that fit `maxw` pixels.
--- Breaks at a space when one is reasonably close, otherwise between characters
--- (fine for Korean). The last line is ellipsized by TextWidget if still too long.
-local function wrapText(str, px, maxw, maxlines, opts)
-    local function width(s) return text(s, px, opts):getSize().w end
-    local lines = {}
-    local rest = str
-    while rest ~= "" and #lines < maxlines do
-        if #lines == maxlines - 1 or width(rest) <= maxw then
-            table.insert(lines, rest)
-            break
-        end
-        local chars = {}
-        for ch in rest:gmatch("[%z\1-\127\194-\244][\128-\191]*") do chars[#chars + 1] = ch end
-        -- largest n with chars[1..n] fitting
-        local lo, hi = 1, #chars
-        while lo < hi do
-            local mid = math.floor((lo + hi + 1) / 2)
-            if width(table.concat(chars, "", 1, mid)) <= maxw then lo = mid else hi = mid - 1 end
-        end
-        local n = lo
-        -- prefer breaking after a space (or '/', ',') in the last 40% of the line
-        for i = n, math.max(1, math.floor(n * 0.6)), -1 do
-            local c = chars[i]
-            if c == " " or c == "/" or c == "," or c == "_" then n = i break end
-        end
-        local line = table.concat(chars, "", 1, n):gsub("%s+$", "")
-        table.insert(lines, line)
-        rest = table.concat(chars, "", n + 1):gsub("^%s+", "")
-    end
-    local group = VerticalGroup:new{ align = "left" }
-    for _, l in ipairs(lines) do
-        local tw = text(l, px, { color = opts and opts.color, bold = opts and opts.bold, max_width = maxw })
-        if opts and opts.strike then
-            -- strikethrough: a line across the middle of the text (TextWidget has no such option)
-            local ts = tw:getSize()
-            local th = math.max(2, math.floor(px / 14))
-            tw = OverlapGroup:new{
-                dimen = Geom:new{ w = ts.w, h = ts.h },
-                tw,
-                VerticalGroup:new{ align = "left",
-                    VerticalSpan:new{ width = math.floor(ts.h * 0.52) },
-                    LineWidget:new{ background = opts.color or BLACK, dimen = Geom:new{ w = ts.w, h = th } } },
-            }
-        end
-        table.insert(group, tw)
-    end
-    return group
-end
+local UI = require("dc_ui")
+local fsize, text, wrapText, inRect = UI.fsize, UI.text, UI.wrapText, UI.inRect
 
 local function hm(t)
     return os.date("!%H:%M", t)
@@ -211,6 +147,7 @@ end
 
 function DeskWidget:onCloseWidget()
     UIManager:unschedule(self.tick_cb)
+    Wake.disarm(self)
     if self.todo_popup then
         UIManager:close(self.todo_popup)
         self.todo_popup = nil
@@ -239,6 +176,7 @@ function DeskWidget:onSuspend()
     self.month_offset = 0
     self.sleeping = true
     self.sleep_time = self.store:now()
+    Wake.arm(self) -- before drawing, so the sleep screen can show the next wake-up
     self:rebuild()
     UIManager:setDirty(self, function() return "full", self.dimen end)
     UIManager:forceRePaint()
@@ -247,6 +185,8 @@ end
 
 function DeskWidget:onResume()
     self.sleeping = false
+    Wake.disarm(self)
+    self.after_sync = nil
     -- Time has jumped while asleep: redraw everything.
     self:refresh(true)
     self:scheduleTick()
@@ -265,9 +205,6 @@ function DeskWidget:isBrowsing()
     return self.selected_day ~= nil or self.month_offset ~= 0
 end
 
-local function inRect(pos, r)
-    return pos and r and pos.x >= r.x and pos.x < r.x + r.w and pos.y >= r.y and pos.y < r.y + r.h
-end
 
 --- Which calendar cell (if any) holds screen position `pos`.
 function DeskWidget:dayAt(pos)
@@ -486,6 +423,10 @@ function DeskWidget:finishSync(ok, err, silent)
         UIManager:show(InfoMessage:new{ text = err or "동기화 실패", timeout = 5 })
     end
     self:refresh(true)
+    -- one-shot hook (timed wake-up while asleep)
+    local after = self.after_sync
+    self.after_sync = nil
+    if after then after(ok, err) end
 end
 
 function DeskWidget:syncNow(silent)
@@ -600,6 +541,10 @@ end
 function DeskWidget:statusText()
     local parts = {}
     if self.sleeping then
+        if self.next_wake then
+            return "잠자기 중 · 다음 자동 동기화 "
+                .. os.date("!%H:%M", self.next_wake + self.store:offset())
+        end
         return "잠자기 중 · 전원 버튼을 누르면 깨어남"
     end
     local powerd = Device:getPowerDevice()
@@ -1226,6 +1171,22 @@ function DeskWidget:buildList(w, h, ox, oy)
     -- leave room for the status bar and for the "…" line shown when the list overflows
     local avail = h - status_h - math.floor(item_px * 1.4)
 
+    -- Asleep: open to-dos under the events (a few rows reserved for them)
+    local todo_open = {}
+    if self.sleeping then
+        for _, mm in ipairs(Memo:memos()) do
+            if not mm.done then todo_open[#todo_open + 1] = mm end
+        end
+    end
+    local todo_row_h = text("가", item_px):getSize().h + math.floor(item_px * 0.28)
+    local todo_head_h = text("가", head_px, { bold = true }):getSize().h + math.floor(item_px * 0.25)
+    local todo_reserve = 0
+    if #todo_open > 0 then
+        -- today's events come first: keep just two to-do rows for sure (the heading shows the total)
+        todo_reserve = math.floor(item_px * 0.9) + 1 + todo_head_h + math.min(#todo_open, 2) * todo_row_h
+        avail = avail - todo_reserve
+    end
+
     local list = VerticalGroup:new{ align = "left" }
     local used = 0
     local function add(widget, gap)
@@ -1290,6 +1251,20 @@ function DeskWidget:buildList(w, h, ox, oy)
     end
     if full then
         table.insert(list, text("  …", item_px, { color = GRAY }))
+        used = used + text("  …", item_px):getSize().h
+    end
+
+    if #todo_open > 0 then
+        local sep = math.floor(item_px * 0.45)
+        table.insert(list, VerticalSpan:new{ width = sep })
+        table.insert(list, LineWidget:new{ background = LIGHT, dimen = Geom:new{ w = w, h = 1 } })
+        table.insert(list, VerticalSpan:new{ width = sep })
+        table.insert(list, text(string.format("할 일 %d", #todo_open), head_px, { bold = true }))
+        table.insert(list, VerticalSpan:new{ width = math.floor(item_px * 0.25) })
+        -- whatever the events left over, at least the reserved rows
+        local budget = (h - status_h) - used - 2 * sep - 1 - todo_head_h
+        local rows = UI.todoRows(todo_open, item_px, w, budget, true)
+        table.insert(list, rows)
     end
 
     local probe = self:statusBar(status_px, w, 0, 0)
@@ -1325,7 +1300,8 @@ function DeskWidget:buildCalendar(W, H)
             self:buildList(iw - gw - 2 * gap - 1, ih, list_x, pad),
         }
     else
-        local gh = math.floor(ih * 0.56)
+        -- asleep, the list also carries the to-dos: give it more of the page
+        local gh = math.floor(ih * ((self.sleeping and Memo:openCount() > 0) and 0.47 or 0.56))
         local gap = math.floor(pad * 0.8)
         local list_y = pad + gh + gap + 1 + gap
         body = VerticalGroup:new{
@@ -1993,277 +1969,12 @@ function DeskWidget:buildMemo(W, H)
     }
 end
 
----------------------------------------------------------------- to-do popup
-
---- A small window over any screen listing the open to-dos; tapping an item
--- ticks it (and back). Items ticked while it is open stay listed (struck
--- through) so a mistaken tap can be undone; they go away on the next opening.
-local TodoPopup = InputContainer:extend{
-    name = "DeskClockTodos",
-    parent = nil,     -- DeskWidget
-    ids = nil,        -- memo ids shown (snapshot when opened)
-    page = 1,
-}
-
-function TodoPopup:init()
-    local W, H = Screen:getWidth(), Screen:getHeight()
-    self.dimen = Geom:new{ x = 0, y = 0, w = W, h = H }
-    if Device:isTouchDevice() then
-        local full = function() return Geom:new{ x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() } end
-        self.ges_events = {
-            TapPopup = { GestureRange:new{ ges = "tap", range = full } },
-            HoldPopup = { GestureRange:new{ ges = "hold", range = full } },
-            SwipePopup = { GestureRange:new{ ges = "swipe", range = full } },
-        }
-    end
-    if Device:hasKeys() then
-        self.key_events.Close = { { "Back" } }
-    end
-    if not self.ids then
-        self.ids = {}
-        for _, m in ipairs(Memo:memos()) do
-            if not m.done then self.ids[#self.ids + 1] = m.id end
-        end
-    end
-    self:build()
-end
-
-function TodoPopup:items()
-    local by_id = {}
-    for _, m in ipairs(Memo:memos()) do by_id[m.id] = m end
-    local list = {}
-    for _, id in ipairs(self.ids) do
-        if by_id[id] then list[#list + 1] = by_id[id] end
-    end
-    return list
-end
-
-function TodoPopup:build()
-    local W, H = Screen:getWidth(), Screen:getHeight()
-    local m = math.min(W, H)
-    local pw = math.floor(W > H and W * 0.62 or W * 0.88)
-    local pad = math.floor(m * 0.035)
-    local iw = pw - 2 * pad
-    local item_px = m * 0.034
-    local small_px = m * 0.024
-    local bth = math.max(2, math.floor(m / 400))
-    self.rects = {}
-
-    local items = self:items()
-    local open_n = 0
-    for _, it in ipairs(items) do if not it.done then open_n = open_n + 1 end end
-
-    -- header
-    local head_h = text("가", item_px * 1.1, { bold = true }):getSize().h
-    local header = OverlapGroup:new{
-        dimen = Geom:new{ w = iw, h = head_h },
-        LeftContainer:new{ dimen = Geom:new{ w = iw, h = head_h },
-            text(string.format("할 일 %d", open_n), item_px * 1.1, { bold = true }) },
-        RightContainer:new{ dimen = Geom:new{ w = iw, h = head_h },
-            text("항목을 누르면 완료 / 되돌리기", small_px, { color = GRAY }) },
-    }
-
-    -- buttons (built first: their height limits the list)
-    local function button(label, px)
-        local t = text(label, px, { bold = true })
-        local ts = t:getSize()
-        local bx, by = math.floor(px * 0.7), math.floor(px * 0.3)
-        return FrameContainer:new{
-            bordersize = bth, radius = 0, margin = 0, color = BLACK, background = WHITE,
-            padding = 0, padding_left = bx, padding_right = bx, padding_top = by, padding_bottom = by,
-            t,
-        }, ts.w + 2 * bx + 2 * bth, ts.h + 2 * by + 2 * bth
-    end
-    local bpx = item_px * 0.85
-    local _, _, btn_h = button("가", bpx)
-
-    -- rows, paged to fit
-    local box = math.floor(item_px * 0.9)
-    local bgap = math.floor(item_px * 0.5)
-    local tw = iw - box - bgap
-    local row_pad = math.floor(item_px * 0.45)
-    local max_list = math.floor(H * 0.78) - 2 * pad - head_h - btn_h - math.floor(item_px * 1.6)
-    local built, pages, cur, used = {}, {}, {}, 0
-    for i, it in ipairs(items) do
-        local body = wrapText((it.text:gsub("%s*\n+%s*", " · ")), item_px, tw, 2,
-            it.done and { color = GRAY, strike = true } or nil)
-        local bh = body:getSize().h
-        local h = bh + 2 * row_pad + 1
-        built[i] = { body = body, h = h, bh = bh }
-        if used + h > max_list and #cur > 0 then
-            table.insert(pages, cur); cur, used = {}, 0
-        end
-        table.insert(cur, i); used = used + h
-    end
-    if #cur > 0 then table.insert(pages, cur) end
-    local npages = math.max(1, #pages)
-    self.page = math.min(math.max(1, self.page), npages)
-
-    local content = VerticalGroup:new{ align = "left", header,
-        VerticalSpan:new{ width = math.floor(item_px * 0.5) } }
-    local y = pad + head_h + math.floor(item_px * 0.5) -- relative to the frame's top-left
-    local row_rects = {}
-    if #items == 0 then
-        table.insert(content, text("할 일이 없습니다", item_px, { color = GRAY }))
-        y = y + text("가", item_px):getSize().h
-    end
-    for _, i in ipairs(pages[self.page] or {}) do
-        local it, b = items[i], built[i]
-        local th = math.floor(item_px * 1.362 + 0.5)
-        local mark = it.done and text("✓", item_px * 0.8, { bold = true, color = GRAY }) or VerticalSpan:new{ width = 0 }
-        local checkbox = FrameContainer:new{
-            bordersize = bth, radius = 0, margin = 0, padding = 0,
-            color = it.done and GRAY or BLACK, background = WHITE,
-            CenterContainer:new{ dimen = Geom:new{ w = box - 2 * bth, h = box - 2 * bth }, mark },
-        }
-        table.insert(content, LineWidget:new{ background = LIGHT, dimen = Geom:new{ w = iw, h = 1 } })
-        table.insert(content, VerticalSpan:new{ width = row_pad })
-        table.insert(content, HorizontalGroup:new{ align = "top",
-            VerticalGroup:new{ align = "left", VerticalSpan:new{ width = math.max(0, math.floor((th - box) / 2)) }, checkbox },
-            HorizontalSpan:new{ width = bgap },
-            b.body,
-        })
-        table.insert(content, VerticalSpan:new{ width = row_pad })
-        table.insert(row_rects, { y = y, h = b.h, id = it.id })
-        y = y + b.h
-    end
-    table.insert(content, LineWidget:new{ background = LIGHT, dimen = Geom:new{ w = iw, h = 1 } })
-    table.insert(content, VerticalSpan:new{ width = math.floor(item_px * 0.6) })
-    y = y + 1 + math.floor(item_px * 0.6)
-
-    -- bottom row: [◀ 1/2 ▶] on the left, [메모 화면] [닫기] on the right
-    local brow_l = HorizontalGroup:new{ align = "center" }
-    local brow_r = HorizontalGroup:new{ align = "center" }
-    local btns = {}
-    if npages > 1 then
-        local prev, pw_, _ = button("◀", bpx)
-        local nxt, nw_ = button("▶", bpx)
-        local pg = text(string.format("%d / %d", self.page, npages), small_px * 1.1, { color = GRAY })
-        local sp = math.floor(item_px * 0.4)
-        table.insert(brow_l, prev); table.insert(brow_l, HorizontalSpan:new{ width = sp })
-        table.insert(brow_l, pg); table.insert(brow_l, HorizontalSpan:new{ width = sp })
-        table.insert(brow_l, nxt)
-        table.insert(btns, { kind = "prev", x = 0, w = pw_ })
-        table.insert(btns, { kind = "next", x = pw_ + 2 * sp + pg:getSize().w, w = nw_ })
-    end
-    local mb, mw = button("메모 화면", bpx)
-    local cb, cw_ = button("닫기", bpx)
-    local rg = math.floor(item_px * 0.5)
-    table.insert(brow_r, mb); table.insert(brow_r, HorizontalSpan:new{ width = rg }); table.insert(brow_r, cb)
-    table.insert(btns, { kind = "memo", x = iw - cw_ - rg - mw, w = mw })
-    table.insert(btns, { kind = "close", x = iw - cw_, w = cw_ })
-    table.insert(content, OverlapGroup:new{
-        dimen = Geom:new{ w = iw, h = btn_h },
-        LeftContainer:new{ dimen = Geom:new{ w = iw, h = btn_h }, brow_l },
-        RightContainer:new{ dimen = Geom:new{ w = iw, h = btn_h }, brow_r },
-    })
-    local btn_y = y
-    y = y + btn_h + pad
-
-    local bw = math.max(3, bth + 1)
-    self.frame = FrameContainer:new{
-        bordersize = bw, radius = 0, margin = 0, padding = pad,
-        color = BLACK, background = WHITE,
-        content,
-    }
-    -- Use the frame's real size (content + padding + border) for the refresh
-    -- area: a region that leaves out the border is drawn into memory but not
-    -- refreshed on the e-ink panel until some later full-screen update.
-    local fs = self.frame:getSize()
-    local fx, fy = math.floor((W - fs.w) / 2), math.floor((H - fs.h) / 2)
-    self.frame_rect = { x = fx, y = fy, w = fs.w, h = fs.h }
-    local slack = math.floor(item_px * 0.3)
-    for _, r in ipairs(row_rects) do
-        table.insert(self.rects, { kind = "item", id = r.id, x = fx, y = fy + bw + r.y, w = fs.w, h = r.h })
-    end
-    for _, bt in ipairs(btns) do
-        table.insert(self.rects, { kind = bt.kind, x = fx + bw + pad + bt.x - slack, y = fy + bw + btn_y - slack,
-            w = bt.w + 2 * slack, h = btn_h + 2 * slack })
-    end
-    self[1] = OverlapGroup:new{
-        dimen = Geom:new{ w = W, h = H },
-        CenterContainer:new{ dimen = Geom:new{ w = W, h = H }, self.frame },
-    }
-end
-
---- Screen area to refresh: the whole frame plus a small margin.
-function TodoPopup:refreshArea()
-    local r, e = self.frame_rect, 4
-    return Geom:new{ x = math.max(0, r.x - e), y = math.max(0, r.y - e), w = r.w + 2 * e, h = r.h + 2 * e }
-end
-
-function TodoPopup:repaint()
-    -- the frame can shrink (e.g. a two-line item on the last page): refresh
-    -- the old area too so no stale border is left behind
-    local old = self.frame_rect and self:refreshArea()
-    self:build()
-    local area = self:refreshArea()
-    if old and (old.w ~= area.w or old.h ~= area.h) and self.parent then
-        -- what the old frame covered must be redrawn from the screen below;
-        -- a dirty parent also repaints this popup on top of it
-        area = area:combine(old)
-        UIManager:setDirty(self.parent, function() return "ui", area end)
-    else
-        UIManager:setDirty(self, function() return "ui", area end)
-    end
-end
-
-function TodoPopup:onShow()
-    local area = self:refreshArea()
-    UIManager:setDirty(self, function() return "ui", area end)
-    return true
-end
-
-function TodoPopup:onClose()
-    UIManager:close(self)
-    if self.parent then
-        self.parent.todo_popup = nil
-        self.parent:refresh(false)
-    end
-    return true
-end
-
-function TodoPopup:onTapPopup(_, ges)
-    local pos = ges and ges.pos
-    if not inRect(pos, self.frame_rect) then return self:onClose() end
-    for _, r in ipairs(self.rects) do
-        if inRect(pos, r) then
-            if r.kind == "item" then
-                Memo:toggleDone(r.id)
-                self:repaint()
-            elseif r.kind == "prev" then
-                self.page = self.page - 1; self:repaint()
-            elseif r.kind == "next" then
-                self.page = self.page + 1; self:repaint()
-            elseif r.kind == "memo" then
-                local parent = self.parent
-                self:onClose()
-                if parent then parent:openMemoScreen() end
-            elseif r.kind == "close" then
-                self:onClose()
-            end
-            return true
-        end
-    end
-    return true
-end
-
-function TodoPopup:onHoldPopup() return true end
-function TodoPopup:onSwipePopup(_, ges)
-    if ges and (ges.direction == "west" or ges.direction == "east") then
-        local n = self.page + (ges.direction == "west" and 1 or -1)
-        if n >= 1 then self.page = n; self:repaint() end
-    end
-    return true
-end
-
 function DeskWidget:showTodoPopup()
     if self.todo_popup then return end
-    self.todo_popup = TodoPopup:new{ parent = self }
+    self.todo_popup = require("dc_todopopup"):new{ parent = self }
     UIManager:show(self.todo_popup)
 end
 
-DeskWidget._TodoPopup = TodoPopup
 
 ---------------------------------------------------------------- assemble
 
