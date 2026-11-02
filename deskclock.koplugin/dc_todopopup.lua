@@ -1,5 +1,8 @@
 --[[--
-To-do popup: opened from the "할 일 N" badge on the clock/calendar/month screens.
+List popups drawn by the plugin (not KOReader's text box), so columns line up:
+  * to-do popup  — the "할 일 N" badge on the clock/calendar/month screens
+  * day popup    — a date tapped on the full-screen month (events, and for
+                   today also the open to-dos, which can be ticked there)
 --]]
 
 local CenterContainer = require("ui/widget/container/centercontainer")
@@ -24,17 +27,20 @@ local text, wrapText, inRect = UI.text, UI.wrapText, UI.inRect
 local BLACK, WHITE, GRAY, LIGHT = UI.BLACK, UI.WHITE, UI.GRAY, UI.LIGHT
 
 
---- A small window over any screen listing the open to-dos; tapping an item
--- ticks it (and back). Items ticked while it is open stay listed (struck
--- through) so a mistaken tap can be undone; they go away on the next opening.
-local TodoPopup = InputContainer:extend{
-    name = "DeskClockTodos",
+--- Generic list popup. Subclasses provide :title(), :hint() and :rows().
+-- Row kinds: { kind="event", time=, title=, past= } · { kind="todo", memo= }
+--            { kind="head", text= } · { kind="note", text= }
+-- To-dos ticked while it is open stay listed (struck through) so a mistaken
+-- tap can be undone; they go away on the next opening.
+local ListPopup = InputContainer:extend{
+    name = "DeskClockPopup",
     parent = nil,     -- DeskWidget
     ids = nil,        -- memo ids shown (snapshot when opened)
     page = 1,
+    memo_button = true,
 }
 
-function TodoPopup:init()
+function ListPopup:init()
     local W, H = Screen:getWidth(), Screen:getHeight()
     self.dimen = Geom:new{ x = 0, y = 0, w = W, h = H }
     if Device:isTouchDevice() then
@@ -57,7 +63,8 @@ function TodoPopup:init()
     self:build()
 end
 
-function TodoPopup:items()
+--- The to-dos captured when the popup opened, in their current state.
+function ListPopup:todos()
     local by_id = {}
     for _, m in ipairs(Memo:memos()) do by_id[m.id] = m end
     local list = {}
@@ -67,7 +74,13 @@ function TodoPopup:items()
     return list
 end
 
-function TodoPopup:build()
+function ListPopup:openCount()
+    local n = 0
+    for _, m in ipairs(self:todos()) do if not m.done then n = n + 1 end end
+    return n
+end
+
+function ListPopup:build()
     local W, H = Screen:getWidth(), Screen:getHeight()
     local m = math.min(W, H)
     local pw = math.floor(W > H and W * 0.62 or W * 0.88)
@@ -75,22 +88,25 @@ function TodoPopup:build()
     local iw = pw - 2 * pad
     local item_px = m * 0.034
     local small_px = m * 0.024
+    local time_px = item_px * 0.85
     local bth = math.max(2, math.floor(m / 400))
     self.rects = {}
 
-    local items = self:items()
-    local open_n = 0
-    for _, it in ipairs(items) do if not it.done then open_n = open_n + 1 end end
-
-    -- header
+    -- header: title on the left, a hint on the right (when it fits)
     local head_h = text("가", item_px * 1.1, { bold = true }):getSize().h
+    local title_w = text(self:title(), item_px * 1.1, { bold = true, max_width = iw })
     local header = OverlapGroup:new{
         dimen = Geom:new{ w = iw, h = head_h },
-        LeftContainer:new{ dimen = Geom:new{ w = iw, h = head_h },
-            text(string.format("할 일 %d", open_n), item_px * 1.1, { bold = true }) },
-        RightContainer:new{ dimen = Geom:new{ w = iw, h = head_h },
-            text("항목을 누르면 완료 / 되돌리기", small_px, { color = GRAY }) },
+        LeftContainer:new{ dimen = Geom:new{ w = iw, h = head_h }, title_w },
     }
+    local hint = self:hint()
+    if hint then
+        local room = iw - title_w:getSize().w - math.floor(item_px)
+        local ht = text(hint, small_px, { color = GRAY })
+        if ht:getSize().w <= room then
+            table.insert(header, RightContainer:new{ dimen = Geom:new{ w = iw, h = head_h }, ht })
+        end
+    end
 
     -- buttons (built first: their height limits the list)
     local function button(label, px)
@@ -106,55 +122,80 @@ function TodoPopup:build()
     local bpx = item_px * 0.85
     local _, _, btn_h = button("가", bpx)
 
-    -- rows, paged to fit
+    -- column geometry shared by all rows
     local box = math.floor(item_px * 0.9)
     local bgap = math.floor(item_px * 0.5)
-    local tw = iw - box - bgap
-    local row_pad = math.floor(item_px * 0.45)
+    local line_h = math.floor(item_px * 1.362 + 0.5)
+    -- fixed time column: titles always start on the same vertical line
+    local time_col = text("00:00–00:00", time_px):getSize().w
+    local tgap = math.floor(item_px * 0.9)
+    local row_pad = math.floor(item_px * 0.38)
     local max_list = math.floor(H * 0.78) - 2 * pad - head_h - btn_h - math.floor(item_px * 1.6)
+
+    -- build every row once, then page them
+    local rows = self:rows()
     local built, pages, cur, used = {}, {}, {}, 0
-    for i, it in ipairs(items) do
-        local body = wrapText((it.text:gsub("%s*\n+%s*", " · ")), item_px, tw, 2,
-            it.done and { color = GRAY, strike = true } or nil)
-        local bh = body:getSize().h
-        local h = bh + 2 * row_pad + 1
-        built[i] = { body = body, h = h, bh = bh }
-        if used + h > max_list and #cur > 0 then
+    for i, r in ipairs(rows) do
+        local w, h
+        if r.kind == "todo" then
+            local done = r.memo.done
+            local body = wrapText((r.memo.text:gsub("%s*\n+%s*", " · ")), item_px, iw - box - bgap, 2,
+                done and { color = GRAY, strike = true } or nil)
+            local cb = UI.checkbox(box, done, item_px * 0.8)
+            w = HorizontalGroup:new{ align = "top",
+                VerticalGroup:new{ align = "left", VerticalSpan:new{ width = math.max(0, math.floor((line_h - box) / 2)) }, cb },
+                HorizontalSpan:new{ width = bgap },
+                body,
+            }
+            h = body:getSize().h
+        elseif r.kind == "event" then
+            local body = wrapText(r.title, item_px, iw - time_col - tgap, 2, r.past and { color = GRAY } or nil)
+            w = HorizontalGroup:new{ align = "top",
+                LeftContainer:new{ dimen = Geom:new{ w = time_col, h = line_h },
+                    text(r.time, time_px, { color = GRAY, bold = not r.past }) },
+                HorizontalSpan:new{ width = tgap },
+                body,
+            }
+            h = body:getSize().h
+        elseif r.kind == "head" then
+            w = text(r.text, item_px, { bold = true, max_width = iw })
+            h = w:getSize().h
+        else -- note
+            w = text(r.text, item_px, { color = GRAY, max_width = iw })
+            h = w:getSize().h
+        end
+        -- a heading gets extra room above it and no separator line
+        local top = r.kind == "head" and math.floor(item_px * 0.9) or row_pad
+        local total = top + h + row_pad + (r.kind == "head" and 0 or 1)
+        built[i] = { widget = w, h = h, top = top, total = total }
+        -- never leave a heading alone at the bottom of a page
+        local need = total
+        if r.kind == "head" and rows[i + 1] then need = need + line_h + 2 * row_pad end
+        if used + need > max_list and #cur > 0 then
             table.insert(pages, cur); cur, used = {}, 0
         end
-        table.insert(cur, i); used = used + h
+        table.insert(cur, i); used = used + total
     end
     if #cur > 0 then table.insert(pages, cur) end
     local npages = math.max(1, #pages)
     self.page = math.min(math.max(1, self.page), npages)
 
     local content = VerticalGroup:new{ align = "left", header,
-        VerticalSpan:new{ width = math.floor(item_px * 0.5) } }
-    local y = pad + head_h + math.floor(item_px * 0.5) -- relative to the frame's top-left
+        VerticalSpan:new{ width = math.floor(item_px * 0.4) } }
+    local y = pad + head_h + math.floor(item_px * 0.4) -- relative to the frame's inner top-left
     local row_rects = {}
-    if #items == 0 then
-        table.insert(content, text("할 일이 없습니다", item_px, { color = GRAY }))
-        y = y + text("가", item_px):getSize().h
-    end
     for _, i in ipairs(pages[self.page] or {}) do
-        local it, b = items[i], built[i]
-        local th = math.floor(item_px * 1.362 + 0.5)
-        local mark = it.done and text("✓", item_px * 0.8, { bold = true, color = GRAY }) or VerticalSpan:new{ width = 0 }
-        local checkbox = FrameContainer:new{
-            bordersize = bth, radius = 0, margin = 0, padding = 0,
-            color = it.done and GRAY or BLACK, background = WHITE,
-            CenterContainer:new{ dimen = Geom:new{ w = box - 2 * bth, h = box - 2 * bth }, mark },
-        }
-        table.insert(content, LineWidget:new{ background = LIGHT, dimen = Geom:new{ w = iw, h = 1 } })
+        local r, b = rows[i], built[i]
+        if r.kind ~= "head" then
+            table.insert(content, LineWidget:new{ background = LIGHT, dimen = Geom:new{ w = iw, h = 1 } })
+        end
+        table.insert(content, VerticalSpan:new{ width = b.top })
+        table.insert(content, b.widget)
         table.insert(content, VerticalSpan:new{ width = row_pad })
-        table.insert(content, HorizontalGroup:new{ align = "top",
-            VerticalGroup:new{ align = "left", VerticalSpan:new{ width = math.max(0, math.floor((th - box) / 2)) }, checkbox },
-            HorizontalSpan:new{ width = bgap },
-            b.body,
-        })
-        table.insert(content, VerticalSpan:new{ width = row_pad })
-        table.insert(row_rects, { y = y, h = b.h, id = it.id })
-        y = y + b.h
+        if r.kind == "todo" then
+            table.insert(row_rects, { y = y, h = b.total, id = r.memo.id })
+        end
+        y = y + b.total
     end
     table.insert(content, LineWidget:new{ background = LIGHT, dimen = Geom:new{ w = iw, h = 1 } })
     table.insert(content, VerticalSpan:new{ width = math.floor(item_px * 0.6) })
@@ -165,7 +206,7 @@ function TodoPopup:build()
     local brow_r = HorizontalGroup:new{ align = "center" }
     local btns = {}
     if npages > 1 then
-        local prev, pw_, _ = button("◀", bpx)
+        local prev, pw_ = button("◀", bpx)
         local nxt, nw_ = button("▶", bpx)
         local pg = text(string.format("%d / %d", self.page, npages), small_px * 1.1, { color = GRAY })
         local sp = math.floor(item_px * 0.4)
@@ -175,11 +216,14 @@ function TodoPopup:build()
         table.insert(btns, { kind = "prev", x = 0, w = pw_ })
         table.insert(btns, { kind = "next", x = pw_ + 2 * sp + pg:getSize().w, w = nw_ })
     end
-    local mb, mw = button("메모 화면", bpx)
     local cb, cw_ = button("닫기", bpx)
     local rg = math.floor(item_px * 0.5)
-    table.insert(brow_r, mb); table.insert(brow_r, HorizontalSpan:new{ width = rg }); table.insert(brow_r, cb)
-    table.insert(btns, { kind = "memo", x = iw - cw_ - rg - mw, w = mw })
+    if self.memo_button and #self.ids > 0 then
+        local mb, mw = button("메모 화면", bpx)
+        table.insert(brow_r, mb); table.insert(brow_r, HorizontalSpan:new{ width = rg })
+        table.insert(btns, { kind = "memo", x = iw - cw_ - rg - mw, w = mw })
+    end
+    table.insert(brow_r, cb)
     table.insert(btns, { kind = "close", x = iw - cw_, w = cw_ })
     table.insert(content, OverlapGroup:new{
         dimen = Geom:new{ w = iw, h = btn_h },
@@ -187,7 +231,6 @@ function TodoPopup:build()
         RightContainer:new{ dimen = Geom:new{ w = iw, h = btn_h }, brow_r },
     })
     local btn_y = y
-    y = y + btn_h + pad
 
     local bw = math.max(3, bth + 1)
     self.frame = FrameContainer:new{
@@ -216,12 +259,12 @@ function TodoPopup:build()
 end
 
 --- Screen area to refresh: the whole frame plus a small margin.
-function TodoPopup:refreshArea()
+function ListPopup:refreshArea()
     local r, e = self.frame_rect, 4
     return Geom:new{ x = math.max(0, r.x - e), y = math.max(0, r.y - e), w = r.w + 2 * e, h = r.h + 2 * e }
 end
 
-function TodoPopup:repaint()
+function ListPopup:repaint()
     -- the frame can shrink (e.g. a two-line item on the last page): refresh
     -- the old area too so no stale border is left behind
     local old = self.frame_rect and self:refreshArea()
@@ -237,13 +280,13 @@ function TodoPopup:repaint()
     end
 end
 
-function TodoPopup:onShow()
+function ListPopup:onShow()
     local area = self:refreshArea()
     UIManager:setDirty(self, function() return "ui", area end)
     return true
 end
 
-function TodoPopup:onClose()
+function ListPopup:onClose()
     UIManager:close(self)
     if self.parent then
         self.parent.todo_popup = nil
@@ -252,7 +295,7 @@ function TodoPopup:onClose()
     return true
 end
 
-function TodoPopup:onTapPopup(_, ges)
+function ListPopup:onTapPopup(_, ges)
     local pos = ges and ges.pos
     if not inRect(pos, self.frame_rect) then return self:onClose() end
     for _, r in ipairs(self.rects) do
@@ -277,8 +320,8 @@ function TodoPopup:onTapPopup(_, ges)
     return true
 end
 
-function TodoPopup:onHoldPopup() return true end
-function TodoPopup:onSwipePopup(_, ges)
+function ListPopup:onHoldPopup() return true end
+function ListPopup:onSwipePopup(_, ges)
     if ges and (ges.direction == "west" or ges.direction == "east") then
         local n = self.page + (ges.direction == "west" and 1 or -1)
         if n >= 1 then self.page = n; self:repaint() end
@@ -286,4 +329,47 @@ function TodoPopup:onSwipePopup(_, ges)
     return true
 end
 
+---------------------------------------------------------------- to-do popup
+
+local TodoPopup = ListPopup:extend{ name = "DeskClockTodos" }
+
+function TodoPopup:title() return string.format("할 일 %d", self:openCount()) end
+function TodoPopup:hint() return "항목을 누르면 완료 / 되돌리기" end
+function TodoPopup:rows()
+    local rows = {}
+    for _, m in ipairs(self:todos()) do rows[#rows + 1] = { kind = "todo", memo = m } end
+    if #rows == 0 then rows[1] = { kind = "note", text = "할 일이 없습니다" } end
+    return rows
+end
+
+---------------------------------------------------------------- day popup
+
+--- @field events list of { time, title, past }   (prepared by the screen)
+-- @field label  "11월 2일 (월)"  @field with_todos  true for today
+local DayPopup = ListPopup:extend{ name = "DeskClockDay", events = nil, label = "", with_todos = false }
+
+function DayPopup:init()
+    if not self.with_todos then self.ids = {} end
+    ListPopup.init(self)
+end
+
+function DayPopup:title() return self.label end
+function DayPopup:hint()
+    return #self.ids > 0 and "할 일을 누르면 완료" or nil
+end
+function DayPopup:rows()
+    local rows = {}
+    for _, e in ipairs(self.events or {}) do
+        rows[#rows + 1] = { kind = "event", time = e.time, title = e.title, past = e.past }
+    end
+    if #rows == 0 then rows[1] = { kind = "note", text = "일정 없음" } end
+    if #self.ids > 0 then
+        rows[#rows + 1] = { kind = "head", text = string.format("할 일 %d", self:openCount()) }
+        for _, m in ipairs(self:todos()) do rows[#rows + 1] = { kind = "todo", memo = m } end
+    end
+    return rows
+end
+
+TodoPopup.DayPopup = DayPopup
+TodoPopup.ListPopup = ListPopup
 return TodoPopup

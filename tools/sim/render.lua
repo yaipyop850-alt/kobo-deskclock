@@ -412,6 +412,27 @@ if os.getenv("TAP_EVENT") then
     -- tap on empty area below the list should toggle
 end
 
+if os.getenv("DAYPOP") then
+    -- full-screen month: tap today's (or tomorrow's) date -> day popup drawn by the plugin
+    local UI = package.loaded["ui/uimanager"]
+    UI.show = function() end
+    local ICS = require("dc_ics")
+    local day = ICS.dayStart(require("dc_store"):now()) + 86400 * tonumber(os.getenv("DAYPOP_OFFSET") or (os.getenv("DAYPOP_TOMORROW") and 1 or 0))
+    wd:showDayDetail(day)
+    local pp = wd.todo_popup
+    assert(pp, "day popup not opened")
+    if os.getenv("DAYPOP_TICK") then
+        local r; for _, x in ipairs(pp.rects) do if x.kind == "item" then r = x break end end
+        if r then pp:onTapPopup(nil, { pos = { x = r.x + 50, y = r.y + r.h / 2 } }) end
+        print("after tick open:", require("dc_memo"):openCount())
+    end
+    pp[1]:paintTo(0, 0)
+    local kinds = {}
+    for _, x in ipairs(pp.rects) do kinds[#kinds + 1] = x.kind end
+    print("day popup rects:", table.concat(kinds, ","))
+    local a = pp:refreshArea(); local fr = pp.frame_rect; local fs = pp.frame:getSize()
+    print("refresh area covers frame:", a.x <= fr.x and a.y <= fr.y and a.x + a.w >= fr.x + fs.w and a.y + a.h >= fr.y + fs.h)
+end
 local f = io.open(OUT, "w")
 f:write(table.concat(ops, "\n"))
 f:close()
@@ -510,14 +531,4 @@ if os.getenv("WAKE_TEST") then
     Store.sync = function() wd:onResume() return true end
     t.cb()
     print("woken during sync: resched", table.concat(resched, ","), "sleeping", tostring(wd.sleeping))
-end
-if os.getenv("DAYPOP_TEST") then
-    -- day popup of the full-screen month: today lists open to-dos, other days do not
-    local UI = package.loaded["ui/uimanager"]
-    local shown
-    UI.show = function(_, w) shown = w.text end
-    local ICS = require("dc_ics")
-    local today = ICS.dayStart(require("dc_store"):now())
-    wd:showDayDetail(today); print("[today]\n" .. tostring(shown))
-    wd:showDayDetail(today + 86400); print("[tomorrow]\n" .. tostring(shown))
 end

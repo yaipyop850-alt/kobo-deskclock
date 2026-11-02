@@ -39,7 +39,7 @@ Reply to the owner in Korean, polite speech (존댓말).
 ## Code layout
 
 - `dc_widget.lua` screens · `dc_ui.lua` shared drawing helpers (text, wrapText, checkbox, todoRows, colours)
-- `dc_todopopup.lua` to-do popup · `dc_wake.lua` timed wake-ups (KOReader `Device.wakeup_mgr`, Kobo only)
+- `dc_todopopup.lua` list popups drawn by the plugin (to-do popup, month day popup; fixed time column) · `dc_wake.lua` timed wake-ups (KOReader `Device.wakeup_mgr`, Kobo only)
 - `dc_store.lua` settings/calendars/sync · `dc_memo.lua` memos, outbox, Google Tasks · `dc_ics.lua` iCal parser
 - `dc_update.lua` self-update · `main.lua` menu, dispatcher, diagnostics
 - New plugin files must be added to `files=` in `release.txt`, or devices will not get them.

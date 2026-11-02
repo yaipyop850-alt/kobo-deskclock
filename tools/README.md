@@ -16,7 +16,7 @@ python3 render.py out.txt out.png <폭> <높이>
 ```
 
 환경 변수: `MEMO_DATA=1`(메모·보낼 일정 예시), `MANY_TODO=1`(할 일 12개), `POPUP=1`(할 일 팝업, `POPUP_TICK`/`POPUP_PAGE`/`POPUP_OUT`),
-`TAP_TEST=1`, `CLOCK_TAP=1`, `HOLD_TEST=1`(터치 시험), `WAKE_TEST=1`(잠든 동안 자동 동기화 흐름: 예약·깨어남·재예약·배터리 하한·사용자 깨움),
+`TAP_TEST=1`, `CLOCK_TAP=1`, `HOLD_TEST=1`(터치 시험), `DAYPOP=1`(전체 달력 날짜 팝업, `DAYPOP_OFFSET=n`일 뒤, `DAYPOP_TICK`), `WAKE_TEST=1`(잠든 동안 자동 동기화 흐름: 예약·깨어남·재예약·배터리 하한·사용자 깨움),
 `PLUGIN_DIR`(다른 플러그인 폴더).
 
 회귀 시험: 날짜 여러 개 × 모든 화면 × 1080x1440/1440x1080을 그려 오류와 `overflow`(화면 밖 글자)가 없는지 봅니다.

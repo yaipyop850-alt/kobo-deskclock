@@ -1203,6 +1203,7 @@ function DeskWidget:buildList(w, h, ox, oy)
         or (self.month_offset ~= 0 and self:displayedMonthStart())
         or today
 
+    local list_time_col = text("00:00–00:00", item_px, { bold = true }):getSize().w
     local drow = self:ddayRow(item_px, w, 2)
     if drow then
         add(drow, math.floor(item_px * 0.45))
@@ -1230,13 +1231,15 @@ function DeskWidget:buildList(w, h, ox, oy)
             for _, o in ipairs(events) do
                 local past = not o.allday and (o.stop > o.start and o.stop or o.start + 60) <= now
                 local indent = math.floor(item_px * 0.6)
+                -- fixed-width time column so "종일" and "13:15–14:15" titles line up
                 local time_w = text(eventTime(o, day), item_px, { color = past and GRAY or BLACK, bold = not past })
+                local th = time_w:getSize().h
                 local line = HorizontalGroup:new{
                     align = "top",
                     HorizontalSpan:new{ width = indent },
-                    time_w,
+                    LeftContainer:new{ dimen = Geom:new{ w = math.max(list_time_col, time_w:getSize().w), h = th }, time_w },
                     HorizontalSpan:new{ width = indent },
-                    wrapText(o.summary, item_px, math.max(item_px * 3, w - 2 * indent - time_w:getSize().w), 2,
+                    wrapText(o.summary, item_px, math.max(item_px * 3, w - 2 * indent - math.max(list_time_col, time_w:getSize().w)), 2,
                         { color = past and GRAY or BLACK }),
                 }
                 local row_y = used
@@ -1324,39 +1327,27 @@ end
 
 --- Popup listing everything on one day (used by the full-screen month).
 function DeskWidget:showDayDetail(day)
+    if self.todo_popup then return end
     local d = os.date("!*t", day)
-    local lines = { string.format("%d월 %d일 (%s)", d.month, d.day, WDAY[d.wday]) }
+    local label = string.format("%d월 %d일 (%s)", d.month, d.day, WDAY[d.wday])
     local hol = self.store:holidaysOnDay(day)
-    if hol then lines[1] = lines[1] .. "  · " .. table.concat(hol, ", ") end
-    table.insert(lines, "")
-    local events = self.store:eventsOnDay(day)
-    if #events == 0 then
-        table.insert(lines, "일정 없음")
-    end
-    for _, o in ipairs(events) do
-        local line = eventTime(o, day) .. "   " .. o.summary
-        if o.location and o.location ~= "" then line = line .. "  (" .. o.location .. ")" end
-        table.insert(lines, line)
+    if hol then label = label .. "  · " .. table.concat(hol, ", ") end
+    local now = self.store:now()
+    local events = {}
+    for _, o in ipairs(self.store:eventsOnDay(day)) do
+        local title = o.summary
+        if o.location and o.location ~= "" then title = title .. "  (" .. o.location .. ")" end
+        events[#events + 1] = {
+            time = eventTime(o, day), title = title,
+            past = not o.allday and (o.stop > o.start and o.stop or o.start + 60) <= now,
+        }
     end
     -- To-dos have no date: they belong to "today", so today's popup lists them too.
-    if day == ICS.dayStart(self.store:now()) then
-        local open = {}
-        for _, m in ipairs(Memo:memos()) do
-            if not m.done then open[#open + 1] = m end
-        end
-        if #open > 0 then
-            table.insert(lines, "")
-            table.insert(lines, string.format("할 일 %d", #open))
-            for i, m in ipairs(open) do
-                if i > 12 then
-                    table.insert(lines, string.format("  …외 %d개", #open - 12))
-                    break
-                end
-                table.insert(lines, "□ " .. (m.text:gsub("%s*\n+%s*", " · ")))
-            end
-        end
-    end
-    UIManager:show(InfoMessage:new{ text = table.concat(lines, "\n"), show_icon = false, timeout = 30 })
+    self.todo_popup = require("dc_todopopup").DayPopup:new{
+        parent = self, label = label, events = events,
+        with_todos = day == ICS.dayStart(now),
+    }
+    UIManager:show(self.todo_popup)
 end
 
 function DeskWidget:buildMonth(W, H)
