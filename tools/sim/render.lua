@@ -433,6 +433,31 @@ if os.getenv("DAYPOP") then
     local a = pp:refreshArea(); local fr = pp.frame_rect; local fs = pp.frame:getSize()
     print("refresh area covers frame:", a.x <= fr.x and a.y <= fr.y and a.x + a.w >= fr.x + fs.w and a.y + a.h >= fr.y + fs.h)
 end
+if os.getenv("SLEEP_POPUP") then
+    -- today's day popup left open when the device goes to sleep
+    local UI = package.loaded["ui/uimanager"]
+    UI.show = function() end
+    local ICS = require("dc_ics")
+    local Store = require("dc_store")
+    Store:getSettings().sleep_view = true
+    wd.mode = "month"
+    wd:showDayDetail(ICS.dayStart(Store:now()))
+    local pp = wd.todo_popup
+    local r; for _, x in ipairs(pp.rects) do if x.kind == "item" then r = x break end end
+    pp:onTapPopup(nil, { pos = { x = r.x + 50, y = r.y + r.h / 2 } })
+    local before = #pp.ids
+    wd:onSuspend()
+    print("popup kept:", wd.todo_popup == pp, "ids", before, "->", #pp.ids, "sleeping", tostring(wd.sleeping))
+    -- simulate midnight passing during sleep, then a timed wake-up refresh
+    local real = os.time
+    os.time = function(t) if t then return real(t) end return NOW + 86400 end
+    pp:refreshForNow()
+    print("after midnight popup day:", os.date("!%m/%d", pp.day), "title:", pp:title())
+    os.time = function(t) if t then return real(t) end return NOW end
+    pp:refreshForNow()
+    ops = {}
+    wd:rebuild(); wd[1]:paintTo(0, 0); pp[1]:paintTo(0, 0)
+end
 local f = io.open(OUT, "w")
 f:write(table.concat(ops, "\n"))
 f:close()
@@ -531,4 +556,19 @@ if os.getenv("WAKE_TEST") then
     Store.sync = function() wd:onResume() return true end
     t.cb()
     print("woken during sync: resched", table.concat(resched, ","), "sleeping", tostring(wd.sleeping))
+end
+if os.getenv("SLEEP_POPUP_RESUME") then
+    local UI = package.loaded["ui/uimanager"]
+    UI.show = function() end
+    local ICS = require("dc_ics")
+    local Store = require("dc_store")
+    wd.mode = "month"
+    wd:showDayDetail(ICS.dayStart(Store:now()))
+    local pp = wd.todo_popup
+    local k1 = {} for _, x in ipairs(pp.rects) do k1[#k1+1] = x.kind end
+    wd:onSuspend()
+    local k2 = {} for _, x in ipairs(pp.rects) do k2[#k2+1] = x.kind end
+    wd:onResume()
+    local k3 = {} for _, x in ipairs(pp.rects) do k3[#k3+1] = x.kind end
+    print("awake:", table.concat(k1, ","), "| asleep:", table.concat(k2, ","), "| resumed:", table.concat(k3, ","))
 end

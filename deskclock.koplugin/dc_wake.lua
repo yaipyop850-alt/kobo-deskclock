@@ -99,6 +99,8 @@ function Wake.run(w)
     w.after_sync = function(ok, err)
         if not w.sleeping then return end -- woken by the user meanwhile
         w.sleep_time = store:now()
+        -- a popup left on the sleep screen shows the new data too
+        if w.todo_popup and w.todo_popup.refreshForNow then w.todo_popup:refreshForNow() end
         w:rebuild()
         UIManager:setDirty(w, function() return "full", w.dimen end)
         UIManager:forceRePaint()

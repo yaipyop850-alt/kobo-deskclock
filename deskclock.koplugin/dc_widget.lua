@@ -166,16 +166,18 @@ end
 -- (after drawing its own sleep screen, which we set to "leave as is").
 function DeskWidget:onSuspend()
     UIManager:unschedule(self.tick_cb)
-    if self.todo_popup then
-        UIManager:close(self.todo_popup)
-        self.todo_popup = nil
-    end
+
     if self.store:getSettings().sleep_view == false then return end
     -- Sleep on today's view, not on a browsed month/date.
     self.selected_day = nil
     self.month_offset = 0
     self.sleeping = true
     self.sleep_time = self.store:now()
+    -- An open popup stays on the sleep screen (the owner leaves today's events
+    -- and to-dos showing); it is refreshed to the current state first.
+    if self.todo_popup and self.todo_popup.refreshForNow then
+        self.todo_popup:refreshForNow()
+    end
     Wake.arm(self) -- before drawing, so the sleep screen can show the next wake-up
     self:rebuild()
     UIManager:setDirty(self, function() return "full", self.dimen end)
@@ -187,6 +189,8 @@ function DeskWidget:onResume()
     self.sleeping = false
     Wake.disarm(self)
     self.after_sync = nil
+    -- a popup kept over the sleep screen gets its buttons back
+    if self.todo_popup and self.todo_popup.build then self.todo_popup:build() end
     -- Time has jumped while asleep: redraw everything.
     self:refresh(true)
     self:scheduleTick()
@@ -1326,12 +1330,8 @@ end
 ---------------------------------------------------------------- full-screen month
 
 --- Popup listing everything on one day (used by the full-screen month).
-function DeskWidget:showDayDetail(day)
-    if self.todo_popup then return end
-    local d = os.date("!*t", day)
-    local label = string.format("%d월 %d일 (%s)", d.month, d.day, WDAY[d.wday])
-    local hol = self.store:holidaysOnDay(day)
-    if hol then label = label .. "  · " .. table.concat(hol, ", ") end
+--- Rows for the day popup: { time, title, past } per event of `day`.
+function DeskWidget:dayEvents(day)
     local now = self.store:now()
     local events = {}
     for _, o in ipairs(self.store:eventsOnDay(day)) do
@@ -1342,10 +1342,23 @@ function DeskWidget:showDayDetail(day)
             past = not o.allday and (o.stop > o.start and o.stop or o.start + 60) <= now,
         }
     end
+    return events
+end
+
+function DeskWidget:dayLabel(day)
+    local d = os.date("!*t", day)
+    local label = string.format("%d월 %d일 (%s)", d.month, d.day, WDAY[d.wday])
+    local hol = self.store:holidaysOnDay(day)
+    if hol then label = label .. "  · " .. table.concat(hol, ", ") end
+    return label
+end
+
+function DeskWidget:showDayDetail(day)
+    if self.todo_popup then return end
     -- To-dos have no date: they belong to "today", so today's popup lists them too.
     self.todo_popup = require("dc_todopopup").DayPopup:new{
-        parent = self, label = label, events = events,
-        with_todos = day == ICS.dayStart(now),
+        parent = self, day = day,
+        with_todos = day == ICS.dayStart(self.store:now()),
     }
     UIManager:show(self.todo_popup)
 end

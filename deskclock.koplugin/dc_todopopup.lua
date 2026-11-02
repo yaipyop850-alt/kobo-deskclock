@@ -21,6 +21,7 @@ local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local Memo = require("dc_memo")
+local ICS = require("dc_ics")
 local UI = require("dc_ui")
 local Screen = Device.screen
 local text, wrapText, inRect = UI.text, UI.wrapText, UI.inRect
@@ -54,12 +55,7 @@ function ListPopup:init()
     if Device:hasKeys() then
         self.key_events.Close = { { "Back" } }
     end
-    if not self.ids then
-        self.ids = {}
-        for _, m in ipairs(Memo:memos()) do
-            if not m.done then self.ids[#self.ids + 1] = m.id end
-        end
-    end
+    if not self.ids then self:snapshot() end
     self:build()
 end
 
@@ -99,7 +95,9 @@ function ListPopup:build()
         dimen = Geom:new{ w = iw, h = head_h },
         LeftContainer:new{ dimen = Geom:new{ w = iw, h = head_h }, title_w },
     }
-    local hint = self:hint()
+    -- asleep nothing can be tapped: no hint, no buttons
+    local asleep = self.parent and self.parent.sleeping
+    local hint = not asleep and self:hint() or nil
     if hint then
         local room = iw - title_w:getSize().w - math.floor(item_px)
         local ht = text(hint, small_px, { color = GRAY })
@@ -225,11 +223,15 @@ function ListPopup:build()
     end
     table.insert(brow_r, cb)
     table.insert(btns, { kind = "close", x = iw - cw_, w = cw_ })
-    table.insert(content, OverlapGroup:new{
-        dimen = Geom:new{ w = iw, h = btn_h },
-        LeftContainer:new{ dimen = Geom:new{ w = iw, h = btn_h }, brow_l },
-        RightContainer:new{ dimen = Geom:new{ w = iw, h = btn_h }, brow_r },
-    })
+    if asleep then
+        btns = {}
+    else
+        table.insert(content, OverlapGroup:new{
+            dimen = Geom:new{ w = iw, h = btn_h },
+            LeftContainer:new{ dimen = Geom:new{ w = iw, h = btn_h }, brow_l },
+            RightContainer:new{ dimen = Geom:new{ w = iw, h = btn_h }, brow_r },
+        })
+    end
     local btn_y = y
 
     local bw = math.max(3, bth + 1)
@@ -329,6 +331,22 @@ function ListPopup:onSwipePopup(_, ges)
     return true
 end
 
+--- Take the current open to-dos again (done ones drop out) and redraw in
+-- memory. The caller repaints the screen (the popup sits on top of it).
+function ListPopup:refreshForNow()
+    self.ids = nil
+    self.page = 1
+    self:snapshot()
+    self:build()
+end
+
+function ListPopup:snapshot()
+    self.ids = {}
+    for _, m in ipairs(Memo:memos()) do
+        if not m.done then self.ids[#self.ids + 1] = m.id end
+    end
+end
+
 ---------------------------------------------------------------- to-do popup
 
 local TodoPopup = ListPopup:extend{ name = "DeskClockTodos" }
@@ -344,22 +362,35 @@ end
 
 ---------------------------------------------------------------- day popup
 
---- @field events list of { time, title, past }   (prepared by the screen)
--- @field label  "11월 2일 (월)"  @field with_todos  true for today
-local DayPopup = ListPopup:extend{ name = "DeskClockDay", events = nil, label = "", with_todos = false }
+--- @field day  local-epoch day start  @field with_todos  true for today
+-- Events and the title come from the screen (parent:dayEvents / dayLabel),
+-- so the popup can be rebuilt with fresh data (e.g. after a timed wake-up).
+local DayPopup = ListPopup:extend{ name = "DeskClockDay", day = nil, with_todos = false }
 
 function DayPopup:init()
     if not self.with_todos then self.ids = {} end
     ListPopup.init(self)
 end
 
-function DayPopup:title() return self.label end
+function DayPopup:snapshot()
+    if self.with_todos then ListPopup.snapshot(self) else self.ids = {} end
+end
+
+--- Today's popup follows "today": after midnight it shows the new day.
+function DayPopup:refreshForNow()
+    if self.with_todos and self.parent then
+        self.day = ICS.dayStart(self.parent.store:now())
+    end
+    ListPopup.refreshForNow(self)
+end
+
+function DayPopup:title() return self.parent and self.parent:dayLabel(self.day) or "" end
 function DayPopup:hint()
     return #self.ids > 0 and "할 일을 누르면 완료" or nil
 end
 function DayPopup:rows()
     local rows = {}
-    for _, e in ipairs(self.events or {}) do
+    for _, e in ipairs(self.parent and self.parent:dayEvents(self.day) or {}) do
         rows[#rows + 1] = { kind = "event", time = e.time, title = e.title, past = e.past }
     end
     if #rows == 0 then rows[1] = { kind = "note", text = "일정 없음" } end
