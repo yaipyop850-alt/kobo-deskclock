@@ -49,3 +49,14 @@ Reply to the owner in Korean, polite speech (존댓말).
 - Never commit real calendar URLs (`deskclock_urls.txt`, `deskclock_write.txt` are git-ignored), the Apps Script
   URL/secret, account e-mail addresses, or real student names.
   Sample data uses fictional names (학생A).
+
+## Notes (미주)
+
+1. **하루 써 보고 다음 기능** (owner confirmed 11/3: keep applying). A big feature waits until the previous one
+   has been used on the real device for about a day. Small fixes and bug fixes can ship right away.
+2. **Secret delivery paths** (reuse in other projects). Secrets (private iCal URLs, Apps Script URL, SECRET,
+   logins) reach the device only by (a) copying a git-ignored file over USB, or (b) an owner-only channel the
+   device reads and then hides/deletes (here: a Google Calendar event titled with the write address, v3.3).
+   Never via the public repo, not even temporarily (history keeps it). Chat is a last resort; rotate afterwards.
+3. New-project template (first-message form, day-one foundation, ongoing rules, CLAUDE.md skeleton):
+   https://claude.ai/artifact/D6xsJNchjXPu8vYz1Nkytu
