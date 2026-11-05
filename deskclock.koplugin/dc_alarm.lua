@@ -1,7 +1,8 @@
 --[[--
 Alarms before timed events and timed to-dos (off by default).
 
-  * lead time: 5 / 10 / 15 / 30 minutes before the start (`alarm_lead`, 0 = off)
+  * lead times: any of 5 / 10 / 15 / 30 minutes before the start (`alarm_leads`,
+    a list; empty = off). Each lead rings separately (30 and 10 -> two alarms).
   * events: every timed event, or only those whose title starts with "!"
     (`alarm_target` = "all" | "mark"); all-day events never ring
   * to-dos: an open to-do whose first line carries a time in brackets,
@@ -33,9 +34,57 @@ local Alarm = {
     DUE_AHEAD = 30,     -- an alarm this close counts as due now (seconds)
 }
 
-function Alarm.lead(store)
-    local v = store:getSettings().alarm_lead
-    return (type(v) == "number" and v > 0) and v or nil
+--- Chosen lead times in minutes, largest first, or nil when off.
+-- (v3.9 kept a single number in `alarm_lead`; it still counts until changed.)
+function Alarm.leads(store)
+    local s = store:getSettings()
+    local list = {}
+    if type(s.alarm_leads) == "table" then
+        for _, v in ipairs(s.alarm_leads) do
+            if type(v) == "number" and v > 0 then list[#list + 1] = v end
+        end
+    elseif type(s.alarm_lead) == "number" and s.alarm_lead > 0 then
+        list[1] = s.alarm_lead
+    end
+    if #list == 0 then return nil end
+    table.sort(list, function(a, b) return a > b end)
+    return list
+end
+
+function Alarm.hasLead(store, min)
+    for _, v in ipairs(Alarm.leads(store) or {}) do if v == min then return true end end
+    return false
+end
+
+--- Turn one lead time on or off (the menu's check boxes).
+function Alarm.toggleLead(store, min)
+    local list = Alarm.leads(store) or {}
+    local out, found = {}, false
+    for _, v in ipairs(list) do
+        if v == min then found = true else out[#out + 1] = v end
+    end
+    if not found then out[#out + 1] = min end
+    table.sort(out, function(a, b) return a > b end)
+    local s = store:getSettings()
+    s.alarm_leads = out
+    s.alarm_lead = nil
+    store:save()
+end
+
+function Alarm.clearLeads(store)
+    local s = store:getSettings()
+    s.alarm_leads = {}
+    s.alarm_lead = nil
+    store:save()
+end
+
+--- "30·10분 전"
+function Alarm.leadsText(store)
+    local list = Alarm.leads(store)
+    if not list then return nil end
+    local t = {}
+    for i, v in ipairs(list) do t[i] = tostring(v) end
+    return table.concat(t, "·") .. "분 전"
 end
 
 function Alarm.target(store)
@@ -84,8 +133,8 @@ end
 
 --- Everything that can ring, with `at` (alarm time) and `start`, sorted by `at`.
 function Alarm.items(store, now)
-    local lead = Alarm.lead(store)
-    if not lead then return {} end
+    local leads = Alarm.leads(store)
+    if not leads then return {} end
     now = now or store:now()
     local list = {}
     local only_marked = Alarm.target(store) == "mark"
@@ -123,7 +172,20 @@ function Alarm.items(store, now)
         end
         if dirty then store:save() end
     end
-    for _, it in ipairs(list) do it.at = it.start - lead * 60 end
+    -- one alarm per item and lead time
+    local out = {}
+    for _, it in ipairs(list) do
+        for _, lead in ipairs(leads) do
+            local a = {}
+            for k, v in pairs(it) do a[k] = v end
+            a.base = it.key
+            a.key = it.key .. "|" .. lead
+            a.lead = lead
+            a.at = it.start - lead * 60
+            out[#out + 1] = a
+        end
+    end
+    list = out
     table.sort(list, function(a, b) if a.at ~= b.at then return a.at < b.at end return a.key < b.key end)
     return list
 end
@@ -138,10 +200,24 @@ end
 function Alarm.due(store, now)
     now = now or store:now()
     local done = fired(store)
-    local list = {}
+    local list, by_base = {}, {}
     for _, it in ipairs(Alarm.items(store, now)) do
         if it.at <= now + Alarm.DUE_AHEAD and it.start > now - 60 and not done[it.key] then
-            list[#list + 1] = it
+            -- several lead times due at once (e.g. the device was off): ring
+            -- once, with the shortest lead, and count the others as rung
+            local prev = by_base[it.base]
+            if not prev then
+                by_base[it.base] = it
+                list[#list + 1] = it
+            elseif it.lead < prev.lead then
+                it.also = prev.also or {}
+                table.insert(it.also, prev.key)
+                for i, x in ipairs(list) do if x == prev then list[i] = it end end
+                by_base[it.base] = it
+            else
+                prev.also = prev.also or {}
+                table.insert(prev.also, it.key)
+            end
         end
     end
     return list
@@ -160,7 +236,10 @@ end
 function Alarm.markFired(store, items)
     local done = fired(store)
     local now = store:now()
-    for _, it in ipairs(items) do done[it.key] = it.start end
+    for _, it in ipairs(items) do
+        done[it.key] = it.start
+        for _, k in ipairs(it.also or {}) do done[k] = it.start end
+    end
     for k, start in pairs(done) do
         if type(start) ~= "number" or start < now - 2 * DAY then done[k] = nil end
     end

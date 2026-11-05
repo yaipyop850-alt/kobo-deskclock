@@ -432,6 +432,25 @@ if os.getenv("DAYPOP") then
     print("day popup rects:", table.concat(kinds, ","))
     local a = pp:refreshArea(); local fr = pp.frame_rect; local fs = pp.frame:getSize()
     print("refresh area covers frame:", a.x <= fr.x and a.y <= fr.y and a.x + a.w >= fr.x + fs.w and a.y + a.h >= fr.y + fs.h)
+    print(string.format("day popup frame width %d of %d (%.0f%%), x %d", fs.w, W, fs.w * 100 / W, fr.x))
+end
+if os.getenv("TITLE_SYNC") then
+    -- full-screen month: tapping "2026년 11월" syncs, the rest of the title line still switches
+    local synced = 0
+    wd.syncNow = function() synced = synced + 1 end
+    wd.refresh = function() wd:rebuild() end
+    local r = wd.month_title_rect
+    print(string.format("title rect %d,%d %dx%d", r.x, r.y, r.w, r.h))
+    wd:onTapToggle(nil, { pos = { x = r.x + r.w / 2, y = r.y + r.h / 2 } })
+    print("tap title: synced", synced, "mode", wd.mode)
+    wd:onTapToggle(nil, { pos = { x = r.x + r.w + 60, y = r.y + r.h / 2 } })
+    print("tap right of title: synced", synced, "mode", wd.mode)
+    wd.mode = "month"; wd:rebuild()
+    local cell; for _, c in ipairs(wd.cell_rects or {}) do cell = c break end
+    print("first date cell top", cell and cell.y, "below title rect:", cell and cell.y >= r.y + r.h)
+    wd.sleeping = true; wd:rebuild()
+    wd:onTapToggle(nil, { pos = { x = r.x + r.w / 2, y = r.y + r.h / 2 } })
+    print("asleep tap title: synced", synced)
 end
 if os.getenv("SLEEP_POPUP") then
     -- today's day popup left open when the device goes to sleep
@@ -659,8 +678,33 @@ if os.getenv("ALARM_TEST") then
     Dev.getPowerDevice = function() return { getCapacity = function() return 8 end, isCharging = function() return false end } end
     wd:onSuspend()
     print("battery 8%: armed", #tasks, s.wake_log[1])
+    -- several lead times: 30 and 10 minutes before -> two separate alarms, then one when both are late
+    Dev.getPowerDevice = function() return { getCapacity = function() return 80 end, isCharging = function() return false end } end
+    wd:onResume()
+    Alarm.clearLeads(Store); Alarm.toggleLead(Store, 10); Alarm.toggleLead(Store, 30)
+    print("leads:", Alarm.leadsText(Store), "has 30:", Alarm.hasLead(Store, 30), "has 5:", Alarm.hasLead(Store, 5))
+    s.wake_hours = 0
+    local d1 = os.date("!%Y-%m-%d", Store:now() + 86400)
+    Memo:addEvent{ title = "학부모 상담", date = d1, time = "16:00", minutes = 30 }
+    Store:mergeLocal()
+    local day1 = require("dc_ics").dayStart(Store:now()) + 86400
+    clock = day1 + 15 * 3600 - Store:offset()   -- 15:00 next day
+    wd:onSuspend()
+    print("armed for", tasks[1] and hmw(tasks[1].at), "|", wd:statusText())
+    fire() -- 15:30
+    print("  title:", wd.todo_popup:title())
+    fire() -- 15:50
+    print("  title:", wd.todo_popup:title())
+    -- both lead times already passed (device was off): one alarm with the shorter lead, both counted
+    Memo:addEvent{ title = "교무 회의", date = d1, time = "17:00", minutes = 30 }
+    Store:mergeLocal()
+    clock = day1 + 16 * 3600 + 55 * 60 - Store:offset()  -- 16:55
+    local due = Alarm.due(Store)
+    print("late, due:", #due, due[1] and due[1].lead, due[1] and due[1].also and #due[1].also)
+    Alarm.markFired(Store, due)
+    print("after marking, due again:", #Alarm.due(Store))
     -- off
-    wd:onResume(); s.alarm_lead = 0
+    wd:onResume(); Alarm.clearLeads(Store)
     Dev.getPowerDevice = function() return { getCapacity = function() return 80 end, isCharging = function() return false end } end
     s.wake_hours = 0; wd:onSuspend()
     print("all off: armed", #tasks, "|", wd:statusText())

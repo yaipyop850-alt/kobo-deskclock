@@ -79,10 +79,15 @@ end
 function ListPopup:build()
     local W, H = Screen:getWidth(), Screen:getHeight()
     local m = math.min(W, H)
+    local item_px = m * 0.034
     local pw = math.floor(W > H and W * 0.62 or W * 0.88)
     local pad = math.floor(m * 0.035)
+    if self.wide then
+        -- about 7 more Korean characters a line, as far as the screen allows
+        pw = math.min(pw + math.floor(item_px * 7), W - math.floor(m * 0.03))
+        if W <= H then pad = math.floor(m * 0.026) end
+    end
     local iw = pw - 2 * pad
-    local item_px = m * 0.034
     local small_px = m * 0.024
     local time_px = item_px * 0.85
     local bth = math.max(2, math.floor(m / 400))
@@ -365,7 +370,7 @@ end
 --- @field day  local-epoch day start  @field with_todos  true for today
 -- Events and the title come from the screen (parent:dayEvents / dayLabel),
 -- so the popup can be rebuilt with fresh data (e.g. after a timed wake-up).
-local DayPopup = ListPopup:extend{ name = "DeskClockDay", day = nil, with_todos = false }
+local DayPopup = ListPopup:extend{ name = "DeskClockDay", day = nil, with_todos = false, wide = true }
 
 function DayPopup:init()
     if not self.with_todos then self.ids = {} end
@@ -404,9 +409,8 @@ end
 ---------------------------------------------------------------- alarm popup
 
 --- @field items  alarm items from dc_alarm (events and timed to-dos), rung together
--- @field lead   minutes before the start
 -- Stays on the screen (also asleep) until closed; to-dos in it can be ticked.
-local AlarmPopup = ListPopup:extend{ name = "DeskClockAlarm", items = nil, lead = nil, memo_button = false }
+local AlarmPopup = ListPopup:extend{ name = "DeskClockAlarm", items = nil, memo_button = false }
 
 function AlarmPopup:snapshot()
     self.ids = {}
@@ -419,7 +423,12 @@ end
 function AlarmPopup:refreshForNow() self:build() end
 
 function AlarmPopup:title()
-    return self.lead and string.format("곧 시작합니다 · %d분 전 알림", self.lead) or "곧 시작합니다"
+    -- all rung for the same lead time: say which one ("30분 전 알림")
+    local lead
+    for _, it in ipairs(self.items or {}) do
+        if lead == nil then lead = it.lead elseif lead ~= it.lead then lead = false end
+    end
+    return lead and string.format("곧 시작합니다 · %d분 전 알림", lead) or "곧 시작합니다"
 end
 function AlarmPopup:hint()
     return #self.ids > 0 and "할 일을 누르면 완료" or nil

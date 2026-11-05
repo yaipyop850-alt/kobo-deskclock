@@ -273,6 +273,12 @@ function DeskWidget:onTapToggle(_, ges)
         self:syncNow()
         return true
     end
+    -- hidden sync button: the "2026년 11월" title of the full-screen month
+    -- (the small [동기화] button is easy to miss there)
+    if not self.sleeping and self.mode == "month" and inRect(pos, self.month_title_rect) then
+        self:syncNow()
+        return true
+    end
     if not self.sleeping and self.mode == "clock" then
         for _, r in ipairs(self.clock_todo_rects or {}) do
             if inRect(pos, r) then
@@ -540,7 +546,7 @@ function DeskWidget:ringAlarms(items, done)
         self.todo_popup = nil
     end
     self.todo_popup = require("dc_todopopup").AlarmPopup:new{
-        parent = self, items = items, lead = Alarm.lead(self.store),
+        parent = self, items = items,
     }
     UIManager:show(self.todo_popup)
     self:rebuild()
@@ -1416,6 +1422,7 @@ function DeskWidget:buildMonth(W, H)
     ------------------------------------------------ header
     local title = text(string.format("%d년 %d월", year, month), title_px, { bold = true })
     local title_w = title:getSize().w
+    local title_h = title:getSize().h
 
     -- right side: time / "기준" / [오늘로], then status + [동기화]
     local right_left
@@ -1449,6 +1456,9 @@ function DeskWidget:buildMonth(W, H)
     if self:isBrowsing() and not self.sleeping then
         self.today_button = { x = right_x - gap, y = 0, w = rl.w + 2 * gap, h = pad + header_h + gap }
     end
+    -- the title text (plus a little slack) syncs; the rest of the line still switches screens
+    local slack = math.floor(title_h * 0.2)
+    self.month_title_rect = { x = 0, y = 0, w = pad + title_w + slack, h = pad + header_h + slack }
     local right = HorizontalGroup:new{ align = "center", right_left, HorizontalSpan:new{ width = gap }, sbar }
 
     -- D-day: beside the title in landscape, on its own line in portrait
