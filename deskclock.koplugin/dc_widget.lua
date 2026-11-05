@@ -36,6 +36,7 @@ local VerticalSpan = require("ui/widget/verticalspan")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local Memo = require("dc_memo")
 local Wake = require("dc_wake")
+local Alarm = require("dc_alarm")
 local ICS = require("dc_ics")
 local Screen = Device.screen
 
@@ -148,6 +149,7 @@ end
 function DeskWidget:onCloseWidget()
     UIManager:unschedule(self.tick_cb)
     Wake.disarm(self)
+    Alarm.stopFlash(self)
     if self.todo_popup then
         UIManager:close(self.todo_popup)
         self.todo_popup = nil
@@ -519,7 +521,33 @@ function DeskWidget:onTick()
     end
     self:maybeAutoSync()
     self:refresh(false)
+    -- awake: alarms ring from the minute tick (asleep, dc_wake wakes us)
+    if not self.sleeping and not self.flash_step then
+        local due = Alarm.due(self.store)
+        if #due > 0 then
+            Alarm.markFired(self.store, due)
+            self:ringAlarms(due)
+        end
+    end
     self:scheduleTick()
+end
+
+--- Show the alarm popup (replacing any other popup) and flash the screen.
+-- `done` runs when the flashing is over.
+function DeskWidget:ringAlarms(items, done)
+    if self.todo_popup then
+        UIManager:close(self.todo_popup)
+        self.todo_popup = nil
+    end
+    self.todo_popup = require("dc_todopopup").AlarmPopup:new{
+        parent = self, items = items, lead = Alarm.lead(self.store),
+    }
+    UIManager:show(self.todo_popup)
+    self:rebuild()
+    -- a dirty screen repaints the popup on top of it too
+    UIManager:setDirty(self, function() return "full", self.dimen end)
+    UIManager:forceRePaint()
+    Alarm.flash(self, done)
 end
 
 function DeskWidget:refresh(full)
@@ -545,11 +573,17 @@ end
 function DeskWidget:statusText()
     local parts = {}
     if self.sleeping then
-        if self.next_wake then
-            return "잠자기 중 · 다음 자동 동기화 "
-                .. os.date("!%H:%M", self.next_wake + self.store:offset())
+        local off = self.store:offset()
+        local today = ICS.dayStart(self.store:now())
+        local function when(t)
+            t = t + off
+            return os.date(ICS.dayStart(t) == today and "!%H:%M" or "!%m/%d %H:%M", t)
         end
-        return "잠자기 중 · 전원 버튼을 누르면 깨어남"
+        local bits = { "잠자기 중" }
+        if self.next_alarm then bits[#bits + 1] = "다음 알림 " .. when(self.next_alarm) end
+        if self.next_sync_at then bits[#bits + 1] = "다음 자동 동기화 " .. when(self.next_sync_at) end
+        if #bits == 1 then bits[2] = "전원 버튼을 누르면 깨어남" end
+        return table.concat(bits, " · ")
     end
     local powerd = Device:getPowerDevice()
     if powerd and powerd.getCapacity then

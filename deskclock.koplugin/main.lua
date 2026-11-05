@@ -49,6 +49,14 @@ local HELP = [[
 · 달력 + 오늘부터의 일정 + 안 한 할 일
 · (실험) 메뉴 '잠든 동안 자동 동기화'를 켜면 정해 둔 간격마다 잠시 깨어나 동기화하고 잠든 화면을 새로 그린 뒤 다시 잠듭니다.
 
+■ 일정 미리 알림
+· 메뉴 '일정 미리 알림'에서 5·10·15·30분 전을 고릅니다(기본은 끔).
+· 시각이 있는 일정이 대상입니다. '제목이 !로 시작하는 일정만'을 고르면 '!회의'처럼 표시한 일정만 알립니다. 종일 일정은 알리지 않습니다.
+· 할 일은 첫 줄에 시각을 괄호로 적으면 대상이 됩니다. 예: 밥 먹기 (15:30). 적은 뒤 처음 오는 그 시각에 한 번 알립니다(밤에 적으면 다음 날).
+· 알림 시각이 되면 화면이 세 번 반전(깜빡)되고 '곧 시작합니다' 팝업이 남습니다. 소리·진동·조명은 쓰지 않습니다.
+· 잠들어 있으면 잠시 깨어나 알린 뒤 팝업을 띄운 채 다시 잠듭니다(Wi-Fi는 켜지 않음). 시계·달력 화면을 띄운 채 잠들었을 때만 동작합니다.
+· 휴대폰에서 새로 넣은 일정은 다음 동기화 뒤부터 알림이 잡힙니다.
+
 ■ D-day
 구글 캘린더 일정 제목 앞에 [D]를 붙이면(예: [D] 2차 지필고사) 가까운 순으로 2개까지 "D-45 2차 지필고사"처럼 표시됩니다. 화면에는 [D]를 뺀 이름이 나옵니다.
 
@@ -291,6 +299,20 @@ function DeskClock:showDiagnostics()
     table.insert(lines, string.format("표시 기간 일정: %d건", #CalStore.occurrences))
     local M = require("dc_memo")
     do
+        local lead = s.alarm_lead or 0
+        local Alarm = require("dc_alarm")
+        local line = "일정 미리 알림: " .. (lead > 0 and (lead .. "분 전, "
+            .. (Alarm.target(CalStore) == "mark" and "!로 시작하는 일정만" or "시각 있는 일정 전체")) or "끔")
+        if lead > 0 then
+            local at, it = Alarm.nextAt(CalStore)
+            if at then
+                line = line .. string.format("\n  다음 알림: %s (%s)", os.date("!%m/%d %H:%M", at),
+                    it.kind == "todo" and "할 일" or "일정")
+            end
+        end
+        table.insert(lines, line)
+    end
+    do
         local wh = s.wake_hours or 0
         table.insert(lines, "잠든 동안 자동 동기화: " .. (wh > 0 and (wh .. "시간마다") or "끔")
             .. (Wake.supported() and "" or " (이 기기에서 지원 안 됨)"))
@@ -420,6 +442,25 @@ function DeskClock:addToMainMenu(menu_items)
             callback = function() CalStore:set("wake_hours", hours) end,
         }
     end
+    local function leadItem(min, label)
+        return {
+            text = label,
+            radio = true,
+            checked_func = function() return (CalStore:getSettings().alarm_lead or 0) == min end,
+            callback = function() CalStore:set("alarm_lead", min) end,
+        }
+    end
+    local function targetItem(target, label)
+        return {
+            text = label,
+            radio = true,
+            enabled_func = function() return (CalStore:getSettings().alarm_lead or 0) > 0 end,
+            checked_func = function()
+                return (CalStore:getSettings().alarm_target == "mark" and "mark" or "all") == target
+            end,
+            callback = function() CalStore:set("alarm_target", target) end,
+        }
+    end
     menu_items.deskclock = {
         text = "책상 시계·달력",
         sorting_hint = "more_tools",
@@ -459,6 +500,19 @@ function DeskClock:addToMainMenu(menu_items)
                     wakeItem(6, "6시간마다"),
                     wakeItem(8, "8시간마다"),
                     wakeItem(12, "12시간마다"),
+                },
+            },
+            {
+                text = "일정 미리 알림",
+                help_text = "시각이 있는 일정과 '(15:30)'처럼 시각을 적은 할 일을 정한 시간 전에 알립니다. 화면이 세 번 반전되고 '곧 시작합니다' 팝업이 남습니다. 잠들어 있으면 잠시 깨어나(Wi-Fi 없이 30초 안팎) 알린 뒤 팝업을 띄운 채 다시 잠듭니다. 배터리 10% 아래(충전 중 아님)면 깨우지 않습니다. 잠든 동안 알림은 Kobo에서만 동작합니다.",
+                sub_item_table = {
+                    leadItem(0, "끄기"),
+                    leadItem(5, "5분 전"),
+                    leadItem(10, "10분 전"),
+                    leadItem(15, "15분 전"),
+                    (function() local t = leadItem(30, "30분 전"); t.separator = true; return t end)(),
+                    targetItem("all", "대상: 시각 있는 일정 전체 + 시각 적은 할 일"),
+                    targetItem("mark", "대상: 제목이 !로 시작하는 일정만 + 시각 적은 할 일"),
                 },
             },
             {

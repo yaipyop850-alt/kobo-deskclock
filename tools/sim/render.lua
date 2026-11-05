@@ -509,6 +509,10 @@ if os.getenv("WAKE_TEST") then
     local NM = package.loaded["ui/network/manager"]
     local tasks, resched, log = {}, {}, {}
     Dev.isKobo = function() return true end
+    -- a clock that moves: the RTC task fires at its scheduled time
+    local clock = NOW
+    os.time = function(t) if t then return real_time(t) end return clock end
+    local function fire(t) clock = clock + t.sec; t.cb() end
     Dev.wakeup_mgr = {
         addTask = function(_, sec, cb) tasks[#tasks + 1] = { sec = sec, cb = cb } end,
         removeTasks = function(_, _, cb)
@@ -534,7 +538,7 @@ if os.getenv("WAKE_TEST") then
     print("armed tasks:", #tasks, tasks[1] and tasks[1].sec, "status:", wd:statusText())
     -- alarm fires: KOReader runs the task callback
     local t = table.remove(tasks, 1)
-    t.cb()
+    fire(t)
     print("after wake: synced", synced, "re-armed", #tasks, "reschedule", table.concat(resched, ","))
     print("log:", Store:getSettings().wake_log[1])
     -- user presses power: resume cancels the next alarm
@@ -546,7 +550,7 @@ if os.getenv("WAKE_TEST") then
     print("low battery: tasks", #tasks, "log:", Store:getSettings().wake_log[1])
     -- battery drops during the chain: wake stops, no re-arm
     cap = 82; wd:onResume(); wd:onSuspend(); t = table.remove(tasks, 1); cap = 15; resched = {}
-    t.cb()
+    fire(t)
     print("drop during chain: tasks", #tasks, "synced", synced, "resched", #resched, "log:", Store:getSettings().wake_log[1])
     -- disabled
     cap = 82; wd:onResume(); Store:getSettings().wake_hours = 0; wd:onSuspend()
@@ -554,8 +558,112 @@ if os.getenv("WAKE_TEST") then
     -- user wakes the device while a wake-up sync is running: no forced re-suspend
     Store:getSettings().wake_hours = 1; wd:onResume(); wd:onSuspend(); t = table.remove(tasks, 1); resched = {}
     Store.sync = function() wd:onResume() return true end
-    t.cb()
+    fire(t)
     print("woken during sync: resched", table.concat(resched, ","), "sleeping", tostring(wd.sleeping))
+end
+if os.getenv("ALARM_TEST") then
+    -- alarms before events / timed to-dos, asleep (RTC wake-ups) and awake (minute tick)
+    local Dev = package.loaded["device"]
+    local UI = package.loaded["ui/uimanager"]
+    local Alarm = require("dc_alarm")
+    local Memo = require("dc_memo")
+    local tasks, resched = {}, {}
+    local clock = NOW
+    os.time = function(t) if t then return real_time(t) end return clock end
+    Dev.isKobo = function() return true end
+    Dev.wakeup_mgr = {
+        addTask = function(_, sec, cb) tasks[#tasks + 1] = { sec = sec, cb = cb, at = clock + sec } end,
+        removeTasks = function(_, _, cb)
+            for i = #tasks, 1, -1 do if tasks[i].cb == cb then table.remove(tasks, i) end end
+        end,
+    }
+    Dev.rescheduleSuspend = function(_, t) resched[#resched + 1] = t end
+    local shown, flashes = {}, 0
+    UI.nextTick = function(_, f) f() end
+    UI.scheduleIn = function(_, _, f, ...) if f ~= wd.tick_cb then f(...) end end
+    UI.unschedule = function() end
+    UI.setDirty = function() end
+    UI.forceRePaint = function() end
+    UI.show = function(_, w, mode) if w.name == "DeskClockFlash" then flashes = flashes + 1 end shown[#shown + 1] = w.name end
+    UI.close = function() end
+    local NM = package.loaded["ui/network/manager"]
+    NM.isConnected = function() return true end
+    NM.isOnline = function() return true end
+    local Store = require("dc_store")
+    local synced = 0
+    Store.sync = function() synced = synced + 1 return true end
+    local s = Store:getSettings()
+    s.sleep_view, s.wake_hours, s.alarm_lead = true, 3, 10
+    -- to-do time parsing
+    for _, c in ipairs{ "밥 먹기 (15:30)", "밥 먹기(9:05)", "회의 ( 16 : 00 )", "메모 (25:00)", "첫 줄 없음\n(15:30)", "괄호 없음 15:30", "점심（12：10）" } do
+        local h, m = Alarm.todoTime(c)
+        print(string.format("todoTime %-24q -> %s", c, h and string.format("%02d:%02d", h, m) or "nil"))
+    end
+    -- NOW = 14:00 local. to-do at 14:30, events 14:40 (!marked) and 15:00, an all-day event
+    local todo = Memo:addMemo("밥 먹기 (14:30)")
+    Memo:addMemo("저녁 장보기 (13:00)")  -- already past today -> tomorrow 13:00
+    local d = os.date("!%Y-%m-%d", Store:now())
+    Memo:addEvent{ title = "!학년 회의", date = d, time = "14:40", minutes = 50 }
+    Memo:addEvent{ title = "교과서 선정 협의", date = d, time = "15:00", minutes = 60 }
+    Memo:addEvent{ title = "종일 행사", date = d }
+    Store:mergeLocal()
+    for _, it in ipairs(Alarm.items(Store)) do
+        print("item", it.kind, os.date("!%m/%d %H:%M", it.at), "start", os.date("!%m/%d %H:%M", it.start), it.title or it.memo_id)
+    end
+    wd:onSuspend()
+    local function hmw(t) return os.date("!%H:%M", t + Store:offset()) end
+    print("armed:", #tasks, tasks[1] and hmw(tasks[1].at), "|", wd:statusText())
+    local function fire()
+        local t = table.remove(tasks, 1)
+        clock = t.at + 15 -- KOReader runs the task ~15 s after the wake-up
+        resched, flashes, shown = {}, 0, {}
+        t.cb()
+        local pp = wd.todo_popup
+        local names = {}
+        for _, it in ipairs(pp and pp.items or {}) do names[#names + 1] = it.title or ("todo " .. it.memo_id) end
+        print(string.format("wake %s: popup=%s [%s] flashes=%d synced=%d resched=%s next=%s | %s", hmw(clock),
+            pp and pp.name or "-", table.concat(names, ", "), flashes, synced, table.concat(resched, ","),
+            tasks[1] and hmw(tasks[1].at) or "-", s.wake_log[1]))
+    end
+    fire() -- 14:20 to-do
+    -- sleep-screen render with the alarm popup on top
+    ops = {}
+    wd:rebuild(); wd[1]:paintTo(0, 0); wd.todo_popup[1]:paintTo(0, 0)
+    local f = io.open(OUT, "w"); f:write(table.concat(ops, "\n")); f:close()
+    print("alarm popup title:", wd.todo_popup:title(), "rects:", #wd.todo_popup.rects)
+    fire() -- 14:30 !학년 회의
+    s.alarm_target = "mark"
+    wd:onResume(); wd:onSuspend()
+    print("mark only, re-armed:", tasks[1] and hmw(tasks[1].at), "|", wd:statusText())
+    fire() -- 17:00 sync (교과서 선정 협의 skipped as unmarked; to-do tomorrow 12:50)
+    -- tick the to-do in the popup while awake, then it must not ring again
+    wd:onResume()
+    print("resumed popup rects:", (function() local k = {} for _, r in ipairs(wd.todo_popup.rects) do k[#k+1] = r.kind end return table.concat(k, ",") end)())
+    -- awake: minute tick rings a new alarm
+    s.alarm_target = "all"
+    Memo:addMemo("서류 제출 (18:00)")
+    shown, flashes = {}, 0
+    -- jump to 17:50 local
+    local d0 = require("dc_ics").dayStart(Store:now())
+    clock = d0 + 17 * 3600 + 50 * 60 - Store:offset() + 5
+    wd:onTick()
+    print("awake tick 17:50: popup", wd.todo_popup and wd.todo_popup.name, "items", wd.todo_popup and #wd.todo_popup.items, "flashes", flashes)
+    flashes = 0
+    wd:onTick()
+    print("next tick rings again?", flashes > 0 and "yes (BAD)" or "no")
+    -- low battery: alarms still ring at 15%, nothing at 8%
+    Dev.getPowerDevice = function() return { getCapacity = function() return 15 end, isCharging = function() return false end } end
+    wd:onSuspend()
+    print("battery 15%: armed", #tasks, "| next sync", tostring(wd.next_sync_at), "| alarm", wd.next_alarm and hmw(wd.next_alarm))
+    wd:onResume()
+    Dev.getPowerDevice = function() return { getCapacity = function() return 8 end, isCharging = function() return false end } end
+    wd:onSuspend()
+    print("battery 8%: armed", #tasks, s.wake_log[1])
+    -- off
+    wd:onResume(); s.alarm_lead = 0
+    Dev.getPowerDevice = function() return { getCapacity = function() return 80 end, isCharging = function() return false end } end
+    s.wake_hours = 0; wd:onSuspend()
+    print("all off: armed", #tasks, "|", wd:statusText())
 end
 if os.getenv("SLEEP_POPUP_RESUME") then
     local UI = package.loaded["ui/uimanager"]

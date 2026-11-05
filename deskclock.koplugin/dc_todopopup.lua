@@ -401,6 +401,52 @@ function DayPopup:rows()
     return rows
 end
 
+---------------------------------------------------------------- alarm popup
+
+--- @field items  alarm items from dc_alarm (events and timed to-dos), rung together
+-- @field lead   minutes before the start
+-- Stays on the screen (also asleep) until closed; to-dos in it can be ticked.
+local AlarmPopup = ListPopup:extend{ name = "DeskClockAlarm", items = nil, lead = nil, memo_button = false }
+
+function AlarmPopup:snapshot()
+    self.ids = {}
+    for _, it in ipairs(self.items or {}) do
+        if it.kind == "todo" then self.ids[#self.ids + 1] = it.memo_id end
+    end
+end
+
+-- keeps its own items when the device goes to sleep or wakes for a sync
+function AlarmPopup:refreshForNow() self:build() end
+
+function AlarmPopup:title()
+    return self.lead and string.format("곧 시작합니다 · %d분 전 알림", self.lead) or "곧 시작합니다"
+end
+function AlarmPopup:hint()
+    return #self.ids > 0 and "할 일을 누르면 완료" or nil
+end
+
+local function hm(t) return os.date("!%H:%M", t) end
+
+function AlarmPopup:rows()
+    local now = self.parent and self.parent.store:now() or 0
+    local by_id = {}
+    for _, m in ipairs(self:todos()) do by_id[m.id] = m end
+    local rows = {}
+    for _, it in ipairs(self.items or {}) do
+        if it.kind == "event" then
+            local t = hm(it.start)
+            if it.stop and it.stop > it.start then t = t .. "–" .. hm(it.stop) end
+            rows[#rows + 1] = { kind = "event", time = t, title = it.title,
+                past = (it.stop and it.stop > it.start and it.stop or it.start + 60) <= now }
+        elseif by_id[it.memo_id] then
+            rows[#rows + 1] = { kind = "todo", memo = by_id[it.memo_id] }
+        end
+    end
+    if #rows == 0 then rows[1] = { kind = "note", text = "알림 항목이 없습니다" } end
+    return rows
+end
+
 TodoPopup.DayPopup = DayPopup
+TodoPopup.AlarmPopup = AlarmPopup
 TodoPopup.ListPopup = ListPopup
 return TodoPopup
