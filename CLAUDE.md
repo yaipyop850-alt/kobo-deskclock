@@ -3,6 +3,14 @@
 KOReader plugin (desk clock & Google Calendar) for the owner's Kobo Aura HD (1080×1440, 265 dpi, Mark 4, 1 GHz single core).
 Reply to the owner in Korean, polite speech (존댓말).
 
+## Before any update (owner's standing rule, 11/9 — applies in every session)
+
+- Do NOT ship right away. First render the screens after the change with the simulator
+  (`tools/sim`, before/after images) and show them to the owner; ship only after the owner confirms.
+- Never ship a single feature or bug fix alone without checking: review what else belongs in the same
+  update (related improvements, issues visible in the owner's photos, pending list in the dev log) and
+  propose it together.
+
 ## Release checklist (every change that ships)
 
 1. Bump `VERSION` in `deskclock.koplugin/dc_store.lua`.
