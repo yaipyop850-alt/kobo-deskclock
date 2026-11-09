@@ -17,6 +17,7 @@ python3 render.py out.txt out.png <폭> <높이>
 
 환경 변수: `MEMO_DATA=1`(메모·보낼 일정 예시), `MANY_TODO=1`(할 일 12개), `POPUP=1`(할 일 팝업, `POPUP_TICK`/`POPUP_PAGE`/`POPUP_OUT`),
 `TAP_TEST=1`, `CLOCK_TAP=1`, `HOLD_TEST=1`(터치 시험), `DAYPOP=1`(전체 달력 날짜 팝업, `DAYPOP_OFFSET=n`일 뒤, `DAYPOP_TICK`), `SLEEP_POPUP=1`/`SLEEP_POPUP_RESUME=1`(팝업을 띄운 채 잠들기·깨기), `WAKE_TEST=1`(잠든 동안 자동 동기화 흐름: 예약·깨어남·재예약·배터리 하한·사용자 깨움),
+환경 변수 `STALE_DAYS=3`(마지막 동기화 N일 전 → 경고 배지), `MONTH_HIDE="아침 조회"`(전체 달력 숨김 단어)는 모든 화면 렌더링에 함께 쓸 수 있음.
 `TITLE_SYNC=1`(전체 달력 제목 터치 → 동기화, 제목 옆은 화면 전환),
 `ALARM_TEST=1`(일정 미리 알림: 할 일 시각 해석, 알림 시점 여러 개·늦게 한꺼번에 울릴 때 한 번만, 잠든 동안 알림·동기화 깨우기 순서, 깨어 있을 때 알림, 한 번만 울림, 배터리 하한; 알림 팝업이 뜬 잠든 화면을 출력 파일로 그림 — 2026-11-04 05:00 UTC 기준),
 `PLUGIN_DIR`(다른 플러그인 폴더).

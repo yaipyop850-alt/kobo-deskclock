@@ -252,7 +252,12 @@ local stubs = {
 }
 for k, v in pairs(stubs) do package.loaded[k] = v end
 
-local settings = { deskclock = { last_sync = NOW - 20 * 60, dday_style = os.getenv("DDAY_STYLE") } }
+local settings = { deskclock = {
+    -- STALE_DAYS=3: last sync N days ago (warning badge); MONTH_HIDE="아침 조회": hidden in the month view
+    last_sync = NOW - (tonumber(os.getenv("STALE_DAYS") or "") or 0) * 86400 - 20 * 60,
+    dday_style = os.getenv("DDAY_STYLE"),
+    month_hide = os.getenv("MONTH_HIDE"),
+} }
 G_reader_settings = {
     readSetting = function(_, k) return settings[k] end,
     saveSetting = function(_, k, v) settings[k] = v end,

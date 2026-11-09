@@ -269,7 +269,7 @@ end
 function DeskWidget:onTapToggle(_, ges)
     self.last_touch = os.time()
     local pos = ges and ges.pos
-    if not self.sleeping and inRect(pos, self.sync_button) then
+    if not self.sleeping and (inRect(pos, self.sync_button) or inRect(pos, self.stale_badge)) then
         self:syncNow()
         return true
     end
@@ -576,6 +576,32 @@ end
 
 ---------------------------------------------------------------- shared bits
 
+--- Seconds since the last successful sync when it is a day or more old, else nil.
+-- (v3.9.2: a stale calendar was easy to miss in the small gray status text.)
+local STALE_SYNC = 24 * 3600
+function DeskWidget:syncStaleAge()
+    if #self.store:getUrls() == 0 then return nil end
+    local last = self.store:getSettings().last_sync
+    if not last then return nil end
+    local age = os.time() - last
+    return age >= STALE_SYNC and age or nil
+end
+
+--- Black badge "동기화 N일 전" (or nil when the data is fresh).
+function DeskWidget:staleBadge(px)
+    local age = self:syncStaleAge()
+    if not age then return nil end
+    local days = math.floor(age / 86400)
+    local lbl = text(string.format("동기화 %d일 전", days), px * 0.9, { bold = true, color = WHITE })
+    local ls = lbl:getSize()
+    local bpx, bpy = math.floor(px * 0.4), math.floor(px * 0.12)
+    return FrameContainer:new{
+        bordersize = 0, radius = 0, margin = 0, background = BLACK,
+        padding = 0, padding_left = bpx, padding_right = bpx, padding_top = bpy, padding_bottom = bpy,
+        lbl,
+    }, ls.w + 2 * bpx
+end
+
 function DeskWidget:statusText()
     local parts = {}
     if self.sleeping then
@@ -600,6 +626,8 @@ function DeskWidget:statusText()
     local s = self.store:getSettings()
     if #self.store:getUrls() == 0 then
         table.insert(parts, "캘린더 미설정")
+    elseif self:syncStaleAge() then
+        -- shown as a black badge next to the text instead
     elseif s.last_sync then
         local ls = s.last_sync + self.store:offset()
         local same_day = ICS.dayStart(ls) == ICS.dayStart(self.store:now())
@@ -616,9 +644,16 @@ end
 --- Status line + a small outlined "동기화" button. Records the button's touch area.
 -- `ox, oy` = absolute top-left where the returned group will be painted.
 function DeskWidget:statusBar(px, maxw, ox, oy)
+    self.stale_badge = nil
     if self.sleeping then
         self.sync_button = nil
-        return text(self:statusText(), px, { color = GRAY, max_width = maxw })
+        local stale, sw = self:staleBadge(px)
+        if not stale then
+            return text(self:statusText(), px, { color = GRAY, max_width = maxw })
+        end
+        local g = math.floor(px * 0.5)
+        return HorizontalGroup:new{ align = "center", stale, HorizontalSpan:new{ width = g },
+            text(self:statusText(), px, { color = GRAY, max_width = math.max(px * 4, maxw - sw - g) }) }
     end
     local label = self.sync_state and (self.sync_state .. "…") or "동기화"
     local btn_text = text(label, px * 0.95, { bold = true, color = self.sync_state and GRAY or BLACK })
@@ -651,10 +686,16 @@ function DeskWidget:statusBar(px, maxw, ox, oy)
         badge_w = ls.w + 2 * bpx
     end
     local bgap = math.floor(px * 0.5)
+    local stale, stale_w = nil, 0
+    if not self.sync_state then stale, stale_w = self:staleBadge(px) end
     local status = self.sync_state and "" or self:statusText()
-    local reserved = bsz.w + gap + (badge and (badge_w + bgap) or 0)
+    local reserved = bsz.w + gap + (badge and (badge_w + bgap) or 0) + (stale and (stale_w + bgap) or 0)
     local st = text(status, px, { color = GRAY, max_width = math.max(px * 4, maxw - reserved) })
     local group = HorizontalGroup:new{ align = "center", st, HorizontalSpan:new{ width = gap } }
+    if stale then
+        table.insert(group, stale)
+        table.insert(group, HorizontalSpan:new{ width = bgap })
+    end
     if badge then
         table.insert(group, badge)
         table.insert(group, HorizontalSpan:new{ width = bgap })
@@ -664,6 +705,13 @@ function DeskWidget:statusBar(px, maxw, ox, oy)
     -- generous touch areas around the small buttons (e-ink fingers are not precise)
     local slack = math.floor(px * 0.6)
     local x = ox + st:getSize().w + gap
+    if stale then
+        -- tapping the warning syncs, like the button
+        local sh = stale:getSize().h
+        local sy0 = oy + math.floor((gs.h - sh) / 2)
+        self.stale_badge = { x = x - slack, y = sy0 - slack, w = stale_w + bgap / 2 + slack, h = sh + 2 * slack }
+        x = x + stale_w + bgap
+    end
     if badge then
         local bh = badge:getSize().h
         local by0 = oy + math.floor((gs.h - bh) / 2)
@@ -1403,6 +1451,26 @@ function DeskWidget:showDayDetail(day)
     UIManager:show(self.todo_popup)
 end
 
+--- Words whose events are left out of the full-screen month only (menu
+-- "전체 달력에서 숨길 단어", comma-separated). Popups, lists and alarms still show them.
+function DeskWidget:monthHideWords()
+    local raw = self.store:getSettings().month_hide or ""
+    local words = {}
+    for w in tostring(raw):gmatch("[^,]+") do
+        w = w:gsub("^%s+", ""):gsub("%s+$", "")
+        if w ~= "" then words[#words + 1] = w end
+    end
+    return words
+end
+
+local function hiddenByWords(title, words)
+    title = title or ""
+    for _, w in ipairs(words) do
+        if title:find(w, 1, true) then return true end
+    end
+    return false
+end
+
 function DeskWidget:buildMonth(W, H)
     local store = self.store
     local now = store:now()
@@ -1521,13 +1589,16 @@ function DeskWidget:buildMonth(W, H)
     local inset = 3
     local bar_h = line_h - 3
 
-    -- bar-type events (all-day or spanning several days) in the month
-    local month_end = first + dim * DAY
+    -- bar-type events (all-day or spanning several days) in the grid, including the
+    -- next month's days that fill the last week (v3.9.2)
+    local grid_end = first + (rows * 7 - first_wd) * DAY
+    local hide = self:monthHideWords()
     local spans = {}
     for _, o in ipairs(store.occurrences or {}) do
         local sday = ICS.dayStart(o.start)
         local eday = ICS.dayStart(math.max(o.start, o.stop - 1))
-        if (o.allday or eday > sday) and o.stop > first and o.start < month_end then
+        if (o.allday or eday > sday) and o.stop > first and o.start < grid_end
+                and not hiddenByWords(o.summary, hide) then
             table.insert(spans, { s = sday, e = eday, title = o.summary })
         end
     end
@@ -1575,7 +1646,11 @@ function DeskWidget:buildMonth(W, H)
             local dn = r * 7 + c - first_wd + 1
             local cell = VerticalGroup:new{ align = "left" }
             local ci = 0
-            if dn >= 1 and dn <= dim then
+            local in_month = dn >= 1 and dn <= dim
+            local next_month = dn > dim
+            -- past days and the next month's days are drawn in gray (v3.9.2)
+            local faded = next_month or day < today
+            if in_month or next_month then
                 table.insert(self.cell_rects, {
                     x = pad + c * cell_w,
                     y = top + r * (cell_h + sep) + sep,
@@ -1589,9 +1664,13 @@ function DeskWidget:buildMonth(W, H)
                 local num
                 if day == today then
                     num = text(tostring(dn), num_px, { bold = true, color = BLACK })
+                elseif next_month then
+                    local nd = os.date("!*t", day)
+                    num = text(nd.day == 1 and string.format("%d/%d", nd.month, nd.day) or tostring(nd.day),
+                        num_px, { color = GRAY })
                 else
                     num = text(tostring(dn), num_px, { bold = holiday ~= nil,
-                        color = (weekend or holiday) and GRAY or BLACK })
+                        color = (faded or weekend or holiday) and GRAY or BLACK })
                 end
                 table.insert(cell, CenterContainer:new{ dimen = Geom:new{ w = cell_w, h = num_h }, num })
 
@@ -1621,7 +1700,7 @@ function DeskWidget:buildMonth(W, H)
                             HorizontalSpan:new{ width = left },
                             OverlapGroup:new{
                                 dimen = Geom:new{ w = bw, h = bar_h },
-                                LineWidget:new{ background = BLACK, dimen = Geom:new{ w = bw, h = bar_h } },
+                                LineWidget:new{ background = faded and GRAY or BLACK, dimen = Geom:new{ w = bw, h = bar_h } },
                                 LeftContainer:new{ dimen = Geom:new{ w = bw, h = bar_h },
                                     HorizontalGroup:new{ align = "center", HorizontalSpan:new{ width = 5 }, label } },
                             },
@@ -1640,8 +1719,9 @@ function DeskWidget:buildMonth(W, H)
                 for _, o in ipairs(store:eventsOnDay(day)) do
                     local sday = ICS.dayStart(o.start)
                     local eday = ICS.dayStart(math.max(o.start, o.stop - 1))
-                    if not o.allday and eday == sday then
-                        table.insert(items, { text = (show_time and (hm(o.start) .. " ") or "") .. o.summary })
+                    if not o.allday and eday == sday and not hiddenByWords(o.summary, hide) then
+                        table.insert(items, { text = (show_time and (hm(o.start) .. " ") or "") .. o.summary,
+                            color = faded and GRAY or nil })
                     end
                 end
                 local extra = hidden[day] or 0
@@ -1668,7 +1748,7 @@ function DeskWidget:buildMonth(W, H)
             end
             -- fixed cell size, independent of how much is written in it
             local box = WidgetContainer:new{ dimen = Geom:new{ w = cell_w, h = cell_h }, cell }
-            if day == today and dn >= 1 and dn <= dim then
+            if day == today and in_month then
                 -- border first, cell content on top (a FrameContainer without background
                 -- paints only its border; its size comes from the inner WidgetContainer)
                 box = OverlapGroup:new{

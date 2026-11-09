@@ -30,6 +30,8 @@ local HELP = [[
 · 빈 곳 탭: 시계 → 달력+목록 → 전체 달력 → 메모 순서로 전환
 · 달력에서 날짜 칸 길게 누르기: 그 날짜에 일정 추가(구글 캘린더로 전송)
 · 전체 달력에서 날짜 탭: 그날 일정 전체 팝업. 왼쪽 위 '2026년 11월' 글자 탭: 동기화, 제목 줄의 나머지 빈 곳 탭: 화면 전환
+· 전체 달력: 오늘 칸은 굵은 테두리, 지난 날짜와 마지막 주의 다음 달 날짜는 회색. 메뉴 '전체 달력에서 숨길 단어'에 적은 단어가 제목에 들어간 일정은 전체 달력 칸에서만 빠집니다.
+· 마지막 동기화가 하루를 넘기면 상태 줄에 검은 '동기화 N일 전' 표시가 나옵니다. 누르면 동기화합니다.
 · 길게 누르기(날짜 칸 밖): 나가기
 · 아래쪽 [동기화] 버튼 또는 아래로 쓸기: Wi-Fi 켜기 → 동기화 → Wi-Fi 끄기
 · [동기화] 옆 '할 일 N' 탭: 할 일 팝업(항목을 누르면 완료·되돌리기)
@@ -47,7 +49,7 @@ local HELP = [[
 
 ■ 잠든 화면
 · 달력 + 오늘부터의 일정 + 안 한 할 일
-· (실험) 메뉴 '잠든 동안 자동 동기화'를 켜면 정해 둔 간격마다 잠시 깨어나 동기화하고 잠든 화면을 새로 그린 뒤 다시 잠듭니다.
+· 메뉴 '잠든 동안 자동 동기화'를 켜면 정해 둔 간격마다 잠시 깨어나 동기화하고 잠든 화면을 새로 그린 뒤 다시 잠듭니다.
 
 ■ 일정 미리 알림
 · 메뉴 '일정 미리 알림'에서 5·10·15·30분 전을 고릅니다. 여러 개를 함께 고를 수 있습니다(예: 30분 전과 10분 전에 각각 알림). 기본은 끔.
@@ -243,6 +245,34 @@ function DeskClock:editUrls()
                     CalStore:load()
                     CalStore.loaded = true
                     UIManager:show(InfoMessage:new{ text = "저장했습니다. '지금 동기화'를 실행해 주세요.", timeout = 3 })
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+--- Words whose events are left out of the full-screen month (comma-separated).
+function DeskClock:editHideWords()
+    local dialog
+    dialog = InputDialog:new{
+        title = "전체 달력에서 숨길 단어",
+        description = "쉼표로 구분합니다. 예: 야자감독, 아침 조회\n제목에 이 단어가 들어간 일정은 전체 달력 칸에서만 빠지고, 날짜 팝업·목록·알림에는 그대로 나옵니다. 비우면 모두 보입니다.",
+        input = CalStore:getSettings().month_hide or "",
+        buttons = {{
+            {
+                text = "취소",
+                id = "close",
+                callback = function() UIManager:close(dialog) end,
+            },
+            {
+                text = "저장",
+                is_enter_default = true,
+                callback = function()
+                    CalStore:set("month_hide", dialog:getInputText())
+                    UIManager:close(dialog)
+                    UIManager:show(InfoMessage:new{ text = "저장했습니다.", timeout = 2 })
                 end,
             },
         }},
@@ -483,6 +513,7 @@ function DeskClock:addToMainMenu(menu_items)
             { text = "메모 화면 열기", callback = function() self:show("memo") end, separator = true },
             { text = "지금 동기화", keep_menu_open = true, callback = function() self:syncFromMenu() end },
             { text = "캘린더 주소 입력", keep_menu_open = true, callback = function() self:editUrls() end },
+            { text = "전체 달력에서 숨길 단어", keep_menu_open = true, callback = function() self:editHideWords() end },
             {
                 text = "자동 동기화 간격",
                 sub_item_table = {
@@ -503,7 +534,7 @@ function DeskClock:addToMainMenu(menu_items)
                 end,
             },
             {
-                text = "잠든 동안 자동 동기화 (실험)",
+                text = "잠든 동안 자동 동기화",
                 help_text = "잠든 기기를 정해 둔 간격마다 잠시 깨워 Wi-Fi 켜기 → 동기화 → 잠든 화면(달력·오늘 일정·할 일) 새로 그리기 → 다시 잠들기를 합니다. 한 번에 1분 안팎 깨어 있고, 최대 2분 30초가 지나면 무조건 다시 잠듭니다. 배터리가 20% 아래(충전 중 아님)면 멈춥니다. 전원 버튼으로 깨우면 예약이 취소되고, 다시 잠들 때 새로 예약됩니다. '잠들 때 달력 남기기'가 켜져 있어야 동작합니다. 기록은 진단 정보에서 볼 수 있습니다.",
                 sub_item_table = {
                     wakeItem(0, "끄기"),
