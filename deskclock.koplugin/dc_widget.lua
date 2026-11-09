@@ -1411,6 +1411,7 @@ function DeskWidget:buildMonth(W, H)
     local mi = td.month - 1 + self.month_offset
     local year, month = td.year + math.floor(mi / 12), mi % 12 + 1
     local m = math.min(W, H)
+    local today_bw = math.max(3, math.floor(m * 0.008))  -- today's cell border, about 0.8 mm
     local landscape = W > H
     local pad = math.floor(m * 0.022)
 
@@ -1573,25 +1574,21 @@ function DeskWidget:buildMonth(W, H)
             local day = week_start + c * DAY
             local dn = r * 7 + c - first_wd + 1
             local cell = VerticalGroup:new{ align = "left" }
+            local ci = 0
             if dn >= 1 and dn <= dim then
                 table.insert(self.cell_rects, {
                     x = pad + c * cell_w,
                     y = top + r * (cell_h + sep) + sep,
                     w = cell_w, h = cell_h, day = day,
                 })
+                -- today: a thick border round the whole cell (v3.9.2; a black circle on the
+                -- number was hard to spot), so its text is kept off the border
+                ci = day == today and (today_bw + 3) or 0
                 local holiday = store:holidaysOnDay(day)
                 local weekend = c == 0 or c == 6
                 local num
                 if day == today then
-                    local t_ = text(tostring(dn), num_px, { bold = true, color = WHITE })
-                    local ts = t_:getSize()
-                    local px_ = math.floor(num_px * 0.35)
-                    num = FrameContainer:new{
-                        bordersize = 0, margin = 0, radius = math.floor(ts.h / 2), background = BLACK,
-                        padding = 0, padding_left = px_, padding_right = px_,
-                        width = ts.w + 2 * px_, height = ts.h,
-                        t_,
-                    }
+                    num = text(tostring(dn), num_px, { bold = true, color = BLACK })
                 else
                     num = text(tostring(dn), num_px, { bold = holiday ~= nil,
                         color = (weekend or holiday) and GRAY or BLACK })
@@ -1656,24 +1653,32 @@ function DeskWidget:buildMonth(W, H)
                 for k = 1, n_show do
                     local it = items[k]
                     table.insert(cell, HorizontalGroup:new{ align = "center",
-                        HorizontalSpan:new{ width = 4 },
-                        text("• " .. it.text, ev_px, { color = it.color or BLACK, max_width = cell_w - 8 }),
+                        HorizontalSpan:new{ width = 4 + ci },
+                        text("• " .. it.text, ev_px, { color = it.color or BLACK, max_width = cell_w - 8 - 2 * ci }),
                     })
                     table.insert(cell, VerticalSpan:new{ width = math.max(0, line_h - text("•", ev_px):getSize().h) })
                 end
                 local more = (#items - n_show) + extra
                 if more > 0 and room > 0 then
                     table.insert(cell, HorizontalGroup:new{ align = "center",
-                        HorizontalSpan:new{ width = 4 },
+                        HorizontalSpan:new{ width = 4 + ci },
                         text("+" .. more .. "개 더", ev_px, { color = GRAY }),
                     })
                 end
             end
             -- fixed cell size, independent of how much is written in it
-            table.insert(row, WidgetContainer:new{
-                dimen = Geom:new{ w = cell_w, h = cell_h },
-                cell,
-            })
+            local box = WidgetContainer:new{ dimen = Geom:new{ w = cell_w, h = cell_h }, cell }
+            if day == today and dn >= 1 and dn <= dim then
+                -- border first, cell content on top (a FrameContainer without background
+                -- paints only its border; its size comes from the inner WidgetContainer)
+                box = OverlapGroup:new{
+                    dimen = Geom:new{ w = cell_w, h = cell_h },
+                    FrameContainer:new{ bordersize = today_bw, margin = 0, padding = 0, color = BLACK,
+                        WidgetContainer:new{ dimen = Geom:new{ w = cell_w - 2 * today_bw, h = cell_h - 2 * today_bw } } },
+                    box,
+                }
+            end
+            table.insert(row, box)
         end
         table.insert(page, row)
     end
