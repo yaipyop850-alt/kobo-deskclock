@@ -585,6 +585,36 @@ if os.getenv("WAKE_TEST") then
     fire(t)
     print("woken during sync: resched", table.concat(resched, ","), "sleeping", tostring(wd.sleeping))
 end
+if os.getenv("SYNC_FLOW") then
+    -- full button-sync path on the current screen: tap [동기화] (or the stale badge), Wi-Fi up, store:sync, finish
+    local UI = package.loaded["ui/uimanager"]
+    local NM = package.loaded["ui/network/manager"]
+    UI.nextTick = function(_, f) f() end
+    -- run scheduled steps at once, except the minute tick and the Wi-Fi timeout guard
+    UI.scheduleIn = function(_, _, f, ...) if f ~= wd.tick_cb and f ~= wd.sync_timeout_cb then f(...) end end
+    UI.unschedule = function() end
+    NM.isConnected = function() return os.getenv("SYNC_WIFI") ~= "off" end
+    NM.isOnline = function() return true end
+    NM.enableWifi = function(_, cb) cb() return true end
+    NM.turnOffWifi = function() end
+    local Store = require("dc_store")
+    local calls = 0
+    Store.sync = function(self)
+        calls = calls + 1
+        self:getSettings().last_sync = os.time()
+        return true
+    end
+    wd:rebuild()
+    print("before: stale", tostring(wd:syncStaleAge()), "| status:", wd:statusText())
+    local target = os.getenv("SYNC_TAP") == "badge" and wd.stale_badge or wd.sync_button
+    print("tap target", target and string.format("%d,%d %dx%d", target.x, target.y, target.w, target.h) or "NONE")
+    local ok, err = pcall(function()
+        wd:onTapToggle(nil, { pos = { x = target.x + target.w / 2, y = target.y + target.h / 2 } })
+    end)
+    print("tap ok", ok, err or "", "| store.sync calls", calls, "| syncing", tostring(wd.syncing), "| state", tostring(wd.sync_state))
+    wd:rebuild()
+    print("after: stale", tostring(wd:syncStaleAge()), "| status:", wd:statusText())
+end
 if os.getenv("ALARM_TEST") then
     -- alarms before events / timed to-dos, asleep (RTC wake-ups) and awake (minute tick)
     local Dev = package.loaded["device"]
