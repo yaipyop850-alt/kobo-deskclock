@@ -17,7 +17,10 @@ local function lfs_attr(path)
 end
 
 local CalStore = {
-    VERSION = "3.9.2",
+    VERSION = "3.10",
+    -- when this copy of the plugin was loaded (KOReader start); an update installed
+    -- after this needs a restart to take effect (status bar shows "재시작 필요")
+    loaded_at = os.time(),
     settings_key = "deskclock",
     urls = nil,           -- cached URL list (re-read on load/sync)
     urls_source = nil,

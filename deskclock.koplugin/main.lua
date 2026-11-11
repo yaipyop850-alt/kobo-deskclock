@@ -25,12 +25,17 @@ local DeskClock = WidgetContainer:extend{
 }
 
 local HELP = [[
+■ 메뉴
+· 위치: 도구 › 책상 시계·달력. 맨 위에 '전체 달력 열기'와 '지금 동기화(마지막 동기화 시각)', 설정은 하위 메뉴(일정 미리 알림 · 자동 동기화 · 화면 설정 · 구글 연결 · 업데이트·관리)에 있습니다.
+· KOReader 제스처 설정에서 '전체 달력 열기'나 '책상 시계: 지금 동기화'를 모서리 탭 등에 연결하면 메뉴 없이 바로 쓸 수 있습니다.
+· 상태 줄의 검은 '재시작 필요'는 업데이트를 설치했지만 아직 KOReader를 다시 시작하지 않았다는 뜻입니다. 누르면 재시작합니다.
+
 ■ 화면 조작
 · 일정 탭: 전체 제목·시간·장소 팝업(다시 탭하거나 20초 뒤 닫힘)
 · 빈 곳 탭: 시계 → 달력+목록 → 전체 달력 → 메모 순서로 전환
 · 달력에서 날짜 칸 길게 누르기: 그 날짜에 일정 추가(구글 캘린더로 전송)
 · 전체 달력에서 날짜 탭: 그날 일정 전체 팝업. 왼쪽 위 '2026년 11월' 글자 탭: 동기화, 제목 줄의 나머지 빈 곳 탭: 화면 전환
-· 전체 달력: 오늘 칸은 굵은 테두리, 지난 날짜와 마지막 주의 다음 달 날짜는 회색. 메뉴 '전체 달력에서 숨길 단어'에 적은 단어가 제목에 들어간 일정은 전체 달력 칸에서만 빠집니다.
+· 전체 달력: 오늘 칸은 굵은 테두리, 지난 날짜와 마지막 주의 다음 달 날짜는 회색. 메뉴 '화면 설정 › 전체 달력에서 숨길 단어'에 적은 단어가 제목에 들어간 일정은 전체 달력 칸에서만 빠집니다.
 · 마지막 동기화가 하루를 넘기면 상태 줄에 검은 '동기화 N일 전' 표시가 나옵니다. 누르면 동기화합니다.
 · 길게 누르기(날짜 칸 밖): 나가기
 · 아래쪽 [동기화] 버튼 또는 아래로 쓸기: Wi-Fi 켜기 → 동기화 → Wi-Fi 끄기
@@ -45,11 +50,11 @@ local HELP = [[
 · 왼쪽 네모 칸 탭: 완료(회색·취소선, 아래로 이동) / 다시 탭하면 되돌림
 · 글 탭: 수정·삭제·일정으로 등록
 · [완료 지우기]: 완료 항목을 한꺼번에 삭제
-· 구글 '내 할 일'과 동기화(메뉴에서 켜고 끔): 동기화할 때마다 양쪽을 맞추며, 양쪽에서 같은 항목을 고쳤으면 기기 쪽이 남습니다.
+· 구글 '내 할 일'과 동기화(메뉴 '구글 연결'에서 켜고 끔): 동기화할 때마다 양쪽을 맞추며, 양쪽에서 같은 항목을 고쳤으면 기기 쪽이 남습니다.
 
 ■ 잠든 화면
 · 달력 + 오늘부터의 일정 + 안 한 할 일
-· 메뉴 '잠든 동안 자동 동기화'를 켜면 정해 둔 간격마다 잠시 깨어나 동기화하고 잠든 화면을 새로 그린 뒤 다시 잠듭니다.
+· 메뉴 '자동 동기화 › 잠든 동안 자동 동기화'를 켜면 정해 둔 간격마다 잠시 깨어나 동기화하고 잠든 화면을 새로 그린 뒤 다시 잠듭니다.
 
 ■ 일정 미리 알림
 · 메뉴 '일정 미리 알림'에서 5·10·15·30분 전을 고릅니다. 여러 개를 함께 고를 수 있습니다(예: 30분 전과 10분 전에 각각 알림). 기본은 끔.
@@ -64,12 +69,12 @@ local HELP = [[
 
 ■ 캘린더 주소
 구글 캘린더(PC) → 설정 → 해당 캘린더 → '캘린더 통합' → 'iCal 형식의 비공개 주소'를 복사합니다.
-KOReader 폴더(.adds/koreader)에 deskclock_urls.txt 파일을 만들고 한 줄에 하나씩 붙여 넣으면 됩니다. 이 파일이 있으면 메뉴에서 입력한 주소보다 우선합니다.
+KOReader 폴더(.adds/koreader)에 deskclock_urls.txt 파일을 만들고 한 줄에 하나씩 붙여 넣으면 됩니다. 이 파일이 있으면 메뉴 '구글 연결 › 캘린더 주소 입력'보다 우선합니다.
 · #로 시작하는 줄은 무시
 · 주소 앞에 !를 붙이면 공휴일 캘린더로 표시
 
 ■ 동기화
-Wi-Fi가 이미 연결되어 있을 때만 자동 동기화합니다(메뉴에서 'Wi-Fi 자동 켜고 끄기'를 켜면 잠시 켭니다).
+Wi-Fi가 이미 연결되어 있을 때만 자동 동기화합니다(메뉴 '자동 동기화 › Wi-Fi 자동 켜고 끄기'를 켜면 잠시 켭니다).
 시계 화면이 떠 있는 동안에는 자동 절전이 멈추므로 충전기 연결을 권장합니다.]]
 
 function DeskClock:onDispatcherRegisterActions()
@@ -84,6 +89,9 @@ function DeskClock:onDispatcherRegisterActions()
     })
     Dispatcher:registerAction("deskclock_calendar", {
         category = "none", event = "DeskClockShowCalendar", title = "달력 열기", general = true,
+    })
+    Dispatcher:registerAction("deskclock_sync", {
+        category = "none", event = "DeskClockSync", title = "책상 시계: 지금 동기화", general = true,
     })
 end
 
@@ -193,6 +201,11 @@ end
 
 function DeskClock:onDeskClockShowMonth()
     self:show("month")
+    return true
+end
+
+function DeskClock:onDeskClockSync()
+    self:syncFromMenu()
     return true
 end
 
@@ -419,6 +432,7 @@ function DeskClock:checkUpdate()
                     UIManager:show(InfoMessage:new{ text = "업데이트 실패: " .. tostring(ierr) })
                     return
                 end
+                CalStore:set("restart_needed_at", os.time())
                 UIManager:show(ConfirmBox:new{
                     text = "v" .. rel.version .. " 설치를 마쳤습니다.\nKOReader를 다시 시작하면 적용됩니다.",
                     ok_text = "지금 재시작",
@@ -444,6 +458,7 @@ function DeskClock:rollbackUpdate()
                 UIManager:show(InfoMessage:new{ text = "실패: " .. tostring(err) })
                 return
             end
+            CalStore:set("restart_needed_at", os.time())
             UIManager:show(ConfirmBox:new{
                 text = "되돌렸습니다. KOReader를 다시 시작하면 적용됩니다.",
                 ok_text = "지금 재시작", cancel_text = "나중에",
@@ -503,50 +518,39 @@ function DeskClock:addToMainMenu(menu_items)
             callback = function() CalStore:set("alarm_target", target) end,
         }
     end
+    -- v3.10 menu (owner's choice, 11/11): the two things used most come first, settings are
+    -- grouped in sub-menus, and the whole menu sits right under 도구 instead of 도구 › 더 보기.
+    local function lastSync()
+        local t = CalStore:getSettings().last_sync
+        if not t then return "아직 없음" end
+        return os.date("!%m/%d %H:%M", t + CalStore:offset())
+    end
+    local function hoursText(h, off)
+        return (h and h > 0) and (h .. "시간") or off
+    end
     menu_items.deskclock = {
         text = "책상 시계·달력",
-        sorting_hint = "more_tools",
+        sorting_hint = "tools",
         sub_item_table = {
-            { text = "시계 화면 열기", callback = function() self:show("clock") end },
-            { text = "달력 화면 열기", callback = function() self:show("calendar") end },
-            { text = "전체 달력 화면 열기", callback = function() self:show("month") end },
-            { text = "메모 화면 열기", callback = function() self:show("memo") end, separator = true },
-            { text = "지금 동기화", keep_menu_open = true, callback = function() self:syncFromMenu() end },
-            { text = "캘린더 주소 입력", keep_menu_open = true, callback = function() self:editUrls() end },
-            { text = "전체 달력에서 숨길 단어", keep_menu_open = true, callback = function() self:editHideWords() end },
+            { text = "전체 달력 열기", callback = function() self:show("month") end },
             {
-                text = "자동 동기화 간격",
-                sub_item_table = {
-                    intervalItem(0, "자동 동기화 끄기"),
-                    intervalItem(1, "1시간"),
-                    intervalItem(3, "3시간"),
-                    intervalItem(6, "6시간"),
-                    intervalItem(12, "12시간"),
-                },
+                text_func = function() return "지금 동기화  ·  마지막 " .. lastSync() end,
+                keep_menu_open = true,
+                callback = function() self:syncFromMenu() end,
+            },
+            {
+                text = "다른 화면 열기",
                 separator = true,
-            },
-            {
-                text = "자동 동기화 때 Wi-Fi 자동 켜고 끄기",
-                help_text = "켜 두면 자동 동기화 시각이 되었을 때 Wi-Fi가 꺼져 있어도 잠시 켜서 동기화한 뒤 다시 끕니다. 끄면 Wi-Fi가 이미 연결된 때만 자동 동기화합니다. (동기화 버튼과 아래로 쓸기는 항상 Wi-Fi를 자동으로 켜고 끕니다.)",
-                checked_func = function() return CalStore:getSettings().auto_wifi_sync == true end,
-                callback = function()
-                    CalStore:set("auto_wifi_sync", not CalStore:getSettings().auto_wifi_sync)
-                end,
-            },
-            {
-                text = "잠든 동안 자동 동기화",
-                help_text = "잠든 기기를 정해 둔 간격마다 잠시 깨워 Wi-Fi 켜기 → 동기화 → 잠든 화면(달력·오늘 일정·할 일) 새로 그리기 → 다시 잠들기를 합니다. 한 번에 1분 안팎 깨어 있고, 최대 2분 30초가 지나면 무조건 다시 잠듭니다. 배터리가 20% 아래(충전 중 아님)면 멈춥니다. 전원 버튼으로 깨우면 예약이 취소되고, 다시 잠들 때 새로 예약됩니다. '잠들 때 달력 남기기'가 켜져 있어야 동작합니다. 기록은 진단 정보에서 볼 수 있습니다.",
                 sub_item_table = {
-                    wakeItem(0, "끄기"),
-                    wakeItem(1, "1시간마다"),
-                    wakeItem(3, "3시간마다"),
-                    wakeItem(6, "6시간마다"),
-                    wakeItem(8, "8시간마다"),
-                    wakeItem(12, "12시간마다"),
+                    { text = "시계 화면", callback = function() self:show("clock") end },
+                    { text = "달력 화면 (달력 + 일정 목록)", callback = function() self:show("calendar") end },
+                    { text = "메모 화면 (할 일)", callback = function() self:show("memo") end },
                 },
             },
             {
-                text = "일정 미리 알림",
+                text_func = function()
+                    return "일정 미리 알림: " .. (Alarm.leadsText(CalStore) or "끔")
+                end,
                 help_text = "시각이 있는 일정과 '(15:30)'처럼 시각을 적은 할 일을 정한 시간 전에 알립니다. 시점은 여러 개를 함께 고를 수 있습니다. 화면이 세 번 반전되고 '곧 시작합니다' 팝업이 남습니다. 잠들어 있으면 잠시 깨어나(Wi-Fi 없이 30초 안팎) 알린 뒤 팝업을 띄운 채 다시 잠듭니다. 배터리 10% 아래(충전 중 아님)면 깨우지 않습니다. 잠든 동안 알림은 Kobo에서만 동작합니다.",
                 sub_item_table = {
                     leadItem(0, "끄기"),
@@ -559,51 +563,92 @@ function DeskClock:addToMainMenu(menu_items)
                 },
             },
             {
-                text = "잠들 때 달력 남기기",
-                help_text = "기기가 잠들 때 KOReader 잠금 화면 대신 달력을 남겨 둡니다. 전자잉크라 잠든 동안 전원을 거의 쓰지 않습니다.",
-                checked_func = function() return CalStore:getSettings().sleep_view ~= false end,
-                callback = function()
-                    CalStore:set("sleep_view", CalStore:getSettings().sleep_view == false)
+                text_func = function()
+                    local s = CalStore:getSettings()
+                    return "자동 동기화: " .. hoursText(s.sync_hours, "끔") .. " · 잠든 동안 " .. hoursText(s.wake_hours, "끔")
                 end,
+                sub_item_table = {
+                    {
+                        text_func = function()
+                            return "간격 (화면이 떠 있을 때): " .. hoursText(CalStore:getSettings().sync_hours, "끔")
+                        end,
+                        sub_item_table = {
+                            intervalItem(0, "자동 동기화 끄기"),
+                            intervalItem(1, "1시간"),
+                            intervalItem(3, "3시간"),
+                            intervalItem(6, "6시간"),
+                            intervalItem(12, "12시간"),
+                        },
+                    },
+                    {
+                        text = "자동 동기화 때 Wi-Fi 자동 켜고 끄기",
+                        help_text = "켜 두면 자동 동기화 시각이 되었을 때 Wi-Fi가 꺼져 있어도 잠시 켜서 동기화한 뒤 다시 끕니다. 끄면 Wi-Fi가 이미 연결된 때만 자동 동기화합니다. (동기화 버튼과 아래로 쓸기는 항상 Wi-Fi를 자동으로 켜고 끕니다.)",
+                        checked_func = function() return CalStore:getSettings().auto_wifi_sync == true end,
+                        callback = function()
+                            CalStore:set("auto_wifi_sync", not CalStore:getSettings().auto_wifi_sync)
+                        end,
+                    },
+                    {
+                        text_func = function()
+                            return "잠든 동안 자동 동기화: " .. hoursText(CalStore:getSettings().wake_hours, "끔")
+                        end,
+                        help_text = "잠든 기기를 정해 둔 간격마다 잠시 깨워 Wi-Fi 켜기 → 동기화 → 잠든 화면(달력·오늘 일정·할 일) 새로 그리기 → 다시 잠들기를 합니다. 한 번에 1분 안팎 깨어 있고, 최대 2분 30초가 지나면 무조건 다시 잠듭니다. 배터리가 20% 아래(충전 중 아님)면 멈춥니다. 전원 버튼으로 깨우면 예약이 취소되고, 다시 잠들 때 새로 예약됩니다. '잠들 때 달력 남기기'가 켜져 있어야 동작합니다. 기록은 진단 정보에서 볼 수 있습니다.",
+                        sub_item_table = {
+                            wakeItem(0, "끄기"),
+                            wakeItem(1, "1시간마다"),
+                            wakeItem(3, "3시간마다"),
+                            wakeItem(6, "6시간마다"),
+                            wakeItem(8, "8시간마다"),
+                            wakeItem(12, "12시간마다"),
+                        },
+                    },
+                },
             },
             {
-                text = "달력 화면에서는 자동 절전 허용",
-                help_text = "켜 두면 달력 화면에서 KOReader 자동 절전 시간이 지나면 기기가 잠들고 달력이 남습니다. 시계 화면은 항상 깨어 있습니다. 충전 중에는 잠들지 않습니다.",
-                checked_func = function() return CalStore:getSettings().calendar_autosleep ~= false end,
-                callback = function()
-                    CalStore:set("calendar_autosleep", CalStore:getSettings().calendar_autosleep == false)
-                end,
+                text = "화면 설정",
+                sub_item_table = {
+                    {
+                        text = "잠들 때 달력 남기기",
+                        help_text = "기기가 잠들 때 KOReader 잠금 화면 대신 달력을 남겨 둡니다. 전자잉크라 잠든 동안 전원을 거의 쓰지 않습니다.",
+                        checked_func = function() return CalStore:getSettings().sleep_view ~= false end,
+                        callback = function()
+                            CalStore:set("sleep_view", CalStore:getSettings().sleep_view == false)
+                        end,
+                    },
+                    {
+                        text = "달력 화면에서는 자동 절전 허용",
+                        help_text = "켜 두면 달력 화면에서 KOReader 자동 절전 시간이 지나면 기기가 잠들고 달력이 남습니다. 시계 화면은 항상 깨어 있습니다. 충전 중에는 잠들지 않습니다.",
+                        checked_func = function() return CalStore:getSettings().calendar_autosleep ~= false end,
+                        callback = function()
+                            CalStore:set("calendar_autosleep", CalStore:getSettings().calendar_autosleep == false)
+                        end,
+                    },
+                    { text = "전체 달력에서 숨길 단어", keep_menu_open = true, callback = function() self:editHideWords() end },
+                },
+            },
+            {
+                text = "구글 연결",
                 separator = true,
+                sub_item_table = {
+                    { text = "캘린더 주소 입력", keep_menu_open = true, callback = function() self:editUrls() end },
+                    { text = "구글 캘린더 쓰기 연결 시험", keep_menu_open = true, callback = function() self:testWrite() end },
+                    {
+                        text = "메모를 구글 할 일과 동기화",
+                        help_text = "켜 두면 동기화할 때마다 메모 화면의 항목이 구글 '내 할 일' 목록과 양방향으로 맞춰집니다. 같은 항목을 양쪽에서 고쳤으면 기기 쪽 내용이 남습니다. Apps Script에 Tasks 서비스를 추가해야 합니다(설치·사용 가이드 3단계).",
+                        checked_func = function() return CalStore:getSettings().tasks_sync ~= false end,
+                        callback = function()
+                            CalStore:set("tasks_sync", CalStore:getSettings().tasks_sync == false)
+                        end,
+                    },
+                },
             },
             {
-                text = "구글 캘린더 쓰기 연결 시험",
-                keep_menu_open = true,
-                callback = function() self:testWrite() end,
-            },
-            {
-                text = "메모를 구글 할 일과 동기화",
-                help_text = "켜 두면 동기화할 때마다 메모 화면의 항목이 구글 '내 할 일' 목록과 양방향으로 맞춰집니다. 같은 항목을 양쪽에서 고쳤으면 기기 쪽 내용이 남습니다. Apps Script에 Tasks 서비스를 추가해야 합니다(설치·사용 가이드 3단계).",
-                checked_func = function() return CalStore:getSettings().tasks_sync ~= false end,
-                callback = function()
-                    CalStore:set("tasks_sync", CalStore:getSettings().tasks_sync == false)
-                end,
-                separator = true,
-            },
-            {
-                text = "업데이트 확인",
-                keep_menu_open = true,
-                callback = function() self:checkUpdate() end,
-            },
-            {
-                text = "이전 버전으로 되돌리기",
-                keep_menu_open = true,
-                callback = function() self:rollbackUpdate() end,
-                separator = true,
-            },
-            {
-                text = "진단 정보",
-                keep_menu_open = true,
-                callback = function() self:showDiagnostics() end,
+                text = "업데이트·관리",
+                sub_item_table = {
+                    { text = "업데이트 확인", keep_menu_open = true, callback = function() self:checkUpdate() end },
+                    { text = "이전 버전으로 되돌리기", keep_menu_open = true, callback = function() self:rollbackUpdate() end, separator = true },
+                    { text = "진단 정보", keep_menu_open = true, callback = function() self:showDiagnostics() end },
+                },
             },
             {
                 text = "사용법",

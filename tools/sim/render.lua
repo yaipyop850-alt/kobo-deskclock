@@ -257,6 +257,8 @@ local settings = { deskclock = {
     last_sync = NOW - (tonumber(os.getenv("STALE_DAYS") or "") or 0) * 86400 - 20 * 60,
     dday_style = os.getenv("DDAY_STYLE"),
     month_hide = os.getenv("MONTH_HIDE"),
+    -- RESTART=1: an update was installed after this KOReader started ("재시작 필요" badge)
+    restart_needed_at = os.getenv("RESTART") and (os.time() + 400 * 86400) or nil,
 } }
 G_reader_settings = {
     readSetting = function(_, k) return settings[k] end,
@@ -601,8 +603,36 @@ if os.getenv("SYNC_FLOW") then
     local calls = 0
     Store.sync = function(self)
         calls = calls + 1
+        if os.getenv("SYNC_FAIL") then return false, "동기화 실패 (1번: 인터넷 연결 끊김)" end
         self:getSettings().last_sync = os.time()
         return true
+    end
+    local shown_msgs = {}
+    UI.show = function(_, w) shown_msgs[#shown_msgs + 1] = (w and w.text) or (w and w.name) or "?" end
+    if os.getenv("SYNC_FAIL") then
+        -- SYNC_FAIL=1: three failed taps in a row; from the second the message suggests Wi-Fi off/on or a reboot
+        wd:rebuild()
+        for i = 1, 3 do
+            local b = wd.sync_button
+            wd:onTapToggle(nil, { pos = { x = b.x + b.w / 2, y = b.y + b.h / 2 } })
+            print(string.format("fail %d: streak=%s msg=%s", i, tostring(Store:getSettings().sync_fail_streak),
+                (shown_msgs[#shown_msgs] or ""):gsub("\n", " / ")))
+        end
+        Store.sync = function(self) self:getSettings().last_sync = os.time() return true end
+        local b = wd.sync_button
+        wd:onTapToggle(nil, { pos = { x = b.x + b.w / 2, y = b.y + b.h / 2 } })
+        print("after success: streak=" .. tostring(Store:getSettings().sync_fail_streak))
+        os.exit(0)
+    end
+    if os.getenv("RESTART") then
+        package.loaded["ui/widget/confirmbox"] = package.loaded["ui/widget/confirmbox"]
+            or { new = function(_, o) return o end }
+        wd:rebuild()
+        local r = wd.stale_badge
+        print("badge kind", wd.badge_kind, "rect", r and r.w)
+        wd:onTapToggle(nil, { pos = { x = r.x + r.w / 2, y = r.y + r.h / 2 } })
+        print("tap restart badge -> shown:", (shown_msgs[#shown_msgs] or ""):gsub("\n", " / "), "| sync calls", calls)
+        os.exit(0)
     end
     wd:rebuild()
     print("before: stale", tostring(wd:syncStaleAge()), "| status:", wd:statusText())

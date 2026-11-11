@@ -269,6 +269,14 @@ end
 function DeskWidget:onTapToggle(_, ges)
     self.last_touch = os.time()
     local pos = ges and ges.pos
+    if not self.sleeping and inRect(pos, self.stale_badge) and self.badge_kind == "restart" then
+        UIManager:show(require("ui/widget/confirmbox"):new{
+            text = "새 버전이 설치되어 있습니다.\nKOReader를 다시 시작하면 적용됩니다.",
+            ok_text = "지금 재시작", cancel_text = "나중에",
+            ok_callback = function() UIManager:restartKOReader() end,
+        })
+        return true
+    end
     if not self.sleeping and (inRect(pos, self.sync_button) or inRect(pos, self.stale_badge)) then
         self:syncNow()
         return true
@@ -431,8 +439,19 @@ function DeskWidget:finishSync(ok, err, silent)
     end
     self.syncing = false
     self.sync_state = nil
+    -- count failures in a row (v3.10): after two, suggest the fix that worked on 11/10
+    local s = self.store:getSettings()
+    local streak = ok and 0 or ((s.sync_fail_streak or 0) + 1)
+    if streak ~= (s.sync_fail_streak or 0) then
+        s.sync_fail_streak = streak > 0 and streak or nil
+        self.store:save()
+    end
     if (not ok or err) and not silent then
-        UIManager:show(InfoMessage:new{ text = err or "동기화 실패", timeout = 5 })
+        local msg = err or "동기화 실패"
+        if streak >= 2 then
+            msg = msg .. string.format("\n\n%d번 연속 실패했습니다. Wi-Fi를 껐다 켜거나, 기기를 재부팅해 보세요.", streak)
+        end
+        UIManager:show(InfoMessage:new{ text = msg, timeout = streak >= 2 and 10 or 5 })
     end
     self:refresh(true)
     -- one-shot hook (timed wake-up while asleep)
@@ -587,12 +606,24 @@ function DeskWidget:syncStaleAge()
     return age >= STALE_SYNC and age or nil
 end
 
---- Black badge "동기화 N일 전" (or nil when the data is fresh).
+--- An update (or rollback) was installed after KOReader started: the running code is old.
+function DeskWidget:restartNeeded()
+    local t = self.store:getSettings().restart_needed_at
+    return t ~= nil and t >= (self.store.loaded_at or 0)
+end
+
+--- Black warning badge in the status bar, or nil:
+--- "재시작 필요" (v3.10) first, else "동기화 N일 전" (v3.9.2). Sets self.badge_kind.
 function DeskWidget:staleBadge(px)
-    local age = self:syncStaleAge()
-    if not age then return nil end
-    local days = math.floor(age / 86400)
-    local lbl = text(string.format("동기화 %d일 전", days), px * 0.9, { bold = true, color = WHITE })
+    local label
+    if self:restartNeeded() then
+        label, self.badge_kind = "재시작 필요", "restart"
+    else
+        local age = self:syncStaleAge()
+        if not age then self.badge_kind = nil return nil end
+        label, self.badge_kind = string.format("동기화 %d일 전", math.floor(age / 86400)), "stale"
+    end
+    local lbl = text(label, px * 0.9, { bold = true, color = WHITE })
     local ls = lbl:getSize()
     local bpx, bpy = math.floor(px * 0.4), math.floor(px * 0.12)
     return FrameContainer:new{
