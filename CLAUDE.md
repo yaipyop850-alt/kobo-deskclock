@@ -2,6 +2,7 @@
 
 KOReader plugin (desk clock & Google Calendar) for the owner's Kobo Aura HD (1080×1440, 265 dpi, Mark 4, 1 GHz single core).
 Reply to the owner in Korean, polite speech (존댓말).
+Resuming after a break? Read `docs/HANDOFF.md` first (state, open items, environment, links).
 
 ## Before any update (owner's standing rule, 11/9 — applies in every session)
 
