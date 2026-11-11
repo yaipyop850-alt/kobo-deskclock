@@ -518,7 +518,7 @@ function DeskClock:addToMainMenu(menu_items)
             callback = function() CalStore:set("alarm_target", target) end,
         }
     end
-    -- v3.10 menu (owner's choice, 11/11): the two things used most come first, settings are
+    -- v4.0 menu (owner's choice, 11/11): the two things used most come first, settings are
     -- grouped in sub-menus, and the whole menu sits right under 도구 instead of 도구 › 더 보기.
     local function lastSync()
         local t = CalStore:getSettings().last_sync

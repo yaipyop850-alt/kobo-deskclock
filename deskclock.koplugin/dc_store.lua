@@ -17,7 +17,7 @@ local function lfs_attr(path)
 end
 
 local CalStore = {
-    VERSION = "3.10",
+    VERSION = "4.0",
     -- when this copy of the plugin was loaded (KOReader start); an update installed
     -- after this needs a restart to take effect (status bar shows "재시작 필요")
     loaded_at = os.time(),

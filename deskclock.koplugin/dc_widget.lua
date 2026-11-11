@@ -439,7 +439,7 @@ function DeskWidget:finishSync(ok, err, silent)
     end
     self.syncing = false
     self.sync_state = nil
-    -- count failures in a row (v3.10): after two, suggest the fix that worked on 11/10
+    -- count failures in a row (v4.0): after two, suggest the fix that worked on 11/10
     local s = self.store:getSettings()
     local streak = ok and 0 or ((s.sync_fail_streak or 0) + 1)
     if streak ~= (s.sync_fail_streak or 0) then
@@ -613,7 +613,7 @@ function DeskWidget:restartNeeded()
 end
 
 --- Black warning badge in the status bar, or nil:
---- "재시작 필요" (v3.10) first, else "동기화 N일 전" (v3.9.2). Sets self.badge_kind.
+--- "재시작 필요" (v4.0) first, else "동기화 N일 전" (v3.9.2). Sets self.badge_kind.
 function DeskWidget:staleBadge(px)
     local label
     if self:restartNeeded() then

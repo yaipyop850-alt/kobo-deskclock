@@ -19,6 +19,7 @@ python3 render.py out.txt out.png <폭> <높이>
 `TAP_TEST=1`, `CLOCK_TAP=1`, `HOLD_TEST=1`(터치 시험), `DAYPOP=1`(전체 달력 날짜 팝업, `DAYPOP_OFFSET=n`일 뒤, `DAYPOP_TICK`), `SLEEP_POPUP=1`/`SLEEP_POPUP_RESUME=1`(팝업을 띄운 채 잠들기·깨기), `WAKE_TEST=1`(잠든 동안 자동 동기화 흐름: 예약·깨어남·재예약·배터리 하한·사용자 깨움),
 환경 변수 `STALE_DAYS=3`(마지막 동기화 N일 전 → 경고 배지), `MONTH_HIDE="아침 조회"`(전체 달력 숨김 단어)는 모든 화면 렌더링에 함께 쓸 수 있음.
 `SYNC_FLOW=1`(동기화 버튼·'동기화 N일 전' 배지 탭 → Wi-Fi → store:sync → 마무리까지 한 바퀴; `SYNC_TAP=badge`, `SYNC_WIFI=off`),
+`SYNC_FAIL=1`(SYNC_FLOW와 함께: 연속 실패 안내), `RESTART=1`(설치 후 재시작 안 함 → '재시작 필요' 배지; SYNC_FLOW와 함께면 배지 탭 시험),
 `TITLE_SYNC=1`(전체 달력 제목 터치 → 동기화, 제목 옆은 화면 전환),
 `ALARM_TEST=1`(일정 미리 알림: 할 일 시각 해석, 알림 시점 여러 개·늦게 한꺼번에 울릴 때 한 번만, 잠든 동안 알림·동기화 깨우기 순서, 깨어 있을 때 알림, 한 번만 울림, 배터리 하한; 알림 팝업이 뜬 잠든 화면을 출력 파일로 그림 — 2026-11-04 05:00 UTC 기준),
 `PLUGIN_DIR`(다른 플러그인 폴더).
@@ -41,3 +42,14 @@ luajit tools/tests/tasks_sync_test.lua $W
 luajit tools/tests/memo_send_test.lua $W
 luajit tools/tests/network_test.lua
 ```
+
+## 메뉴 미리보기 (`sim/menu_dump.lua`, `sim/menu_draw.py`)
+
+실제 `main.lua`의 메뉴 정의를 읽어(다른 KOReader 모듈은 빈 껍데기로 대신) 메뉴 트리를 내보내고, 그림으로 그립니다.
+
+```
+cd tools/sim
+luajit menu_dump.lua <scratch> > menu.txt
+python3 menu_draw.py menu.txt menu.png
+```
+
