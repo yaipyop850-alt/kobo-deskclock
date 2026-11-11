@@ -14,7 +14,8 @@ Resuming after a break? Read `docs/HANDOFF.md` first (state, open items, environ
 
 ## Release checklist (every change that ships)
 
-1. Bump `VERSION` in `deskclock.koplugin/dc_store.lua`.
+1. Bump `VERSION` in `deskclock.koplugin/dc_store.lua`. Numbering (owner, 11/11): one digit after the dot
+   (4.0 → 4.1 … 4.9 → 5.0), bug fixes as 4.0.1; never two digits like 3.10.
 2. Update `release.txt` (`version=`, `files=` must list every plugin file, `notes=` one line in Korean).
 3. Commit and push to `main`. Devices fetch from
    `https://raw.githubusercontent.com/yaipyop850-alt/kobo-deskclock/main/` (CDN cache up to ~5 min).
@@ -26,7 +27,7 @@ Resuming after a break? Read `docs/HANDOFF.md` first (state, open items, environ
 5. Keep the install & usage guide current — it must always describe the LATEST version from scratch
    (written for a first-time user re-setting the device, incl. Apps Script and PC-less write address):
    https://claude.ai/artifact/CsLeEXGm5WFJZSr5xeLCbM  ("설치·사용 가이드 (처음부터)").
-   Edit the affected sections in place (no "vX부터" add-ons) and update "v3.x 기준" in 개요.
+   Edit the affected sections in place (no "vX부터" add-ons) and update "vX.Y 기준" in 개요.
    The old guide https://claude.ai/artifact/1WnV3DUGs6DAK3dfRzAKdv is frozen (구판).
    In-app text that points to guide steps must match the new guide's step numbers.
 
@@ -51,7 +52,7 @@ Resuming after a break? Read `docs/HANDOFF.md` first (state, open items, environ
 - `dc_todopopup.lua` list popups drawn by the plugin (to-do popup, month day popup; fixed time column) · `dc_wake.lua` timed wake-ups (KOReader `Device.wakeup_mgr`, Kobo only; ONE RTC task = earliest of next sync / next alarm)
 - `dc_alarm.lua` alarms before timed events and "(15:30)" to-dos: what is due, rung-once record, screen-invert flash
 - `dc_store.lua` settings/calendars/sync · `dc_memo.lua` memos, outbox, Google Tasks · `dc_ics.lua` iCal parser
-- `dc_update.lua` self-update · `main.lua` menu, dispatcher, diagnostics
+- `dc_update.lua` self-update · `main.lua` menu (v4.0: under 도구, grouped sub-menus; preview with `tools/sim/menu_dump.lua` + `menu_draw.py`), dispatcher, diagnostics
 - New plugin files must be added to `files=` in `release.txt`, or devices will not get them.
 
 ## Privacy
