@@ -15,7 +15,8 @@ few seconds apart could leave the RTC set to a time already past.)
 
 Safety:
   * battery below MIN_BATTERY (and not charging) -> no more syncs;
-    below MIN_ALARM_BATTERY -> no wake-ups at all
+    at or below dc_battery.OFF (15 %) -> the next wake-up powers the device off
+    (v4.1; before, wake-ups simply stopped below 10 %)
   * the user waking the device (power button) cancels the pending wake-up
   * every wake-up is logged (last 8) for the diagnostics screen
 --]]
@@ -24,10 +25,11 @@ local Device = require("device")
 local UIManager = require("ui/uimanager")
 local logger = require("logger")
 local Alarm = require("dc_alarm")
+local Battery = require("dc_battery")
 
 local Wake = {
     MIN_BATTERY = 20,        -- % for syncs (Wi-Fi)
-    MIN_ALARM_BATTERY = 10,  -- % for alarms (no Wi-Fi)
+    MIN_ALARM_BATTERY = 15,  -- % for alarms (no Wi-Fi); at this level dc_battery powers off
     BUDGET = 150,            -- seconds awake at most for a sync
     ALARM_BUDGET = 40,       -- seconds awake at most for an alarm alone
     MIN_AHEAD = 20,          -- never set the RTC closer than this
@@ -101,8 +103,14 @@ function Wake.arm(w)
     local hours = Wake.hours(w.store)
     local cap, charging = battery()
     local low = cap and not charging
-    if low and cap < Wake.MIN_ALARM_BATTERY then
-        Wake.log(w.store, string.format("배터리 %d%% — 자동 깨우기 안 함", cap))
+    if low and cap <= Battery.OFF then
+        -- going to sleep at the power-off level: wake up once shortly to power
+        -- off (or after "10분 뒤 다시" has run out)
+        local at = math.max(os.time(), Battery.snooze_until or 0)
+        Wake.log(w.store, string.format("배터리 %d%% — 잠시 뒤 깨어나 전원 끄기", cap))
+        w.next_sync_at = at
+        w.power_off_wake = true
+        Wake.schedule(w)
         return
     end
     if hours and low and cap < Wake.MIN_BATTERY then
@@ -117,6 +125,7 @@ end
 function Wake.disarm(w)
     removeTask(w)
     w.next_sync_at = nil
+    w.power_off_wake = nil
 end
 
 --- The RTC alarm went off: ring due alarms, sync if due, redraw, sleep again.
@@ -127,10 +136,24 @@ function Wake.run(w)
     w.next_wake = nil
     local cap, charging = battery()
     local low = cap and not charging
-    if low and cap < Wake.MIN_ALARM_BATTERY then
-        Wake.log(store, string.format("배터리 %d%% — 자동 깨우기 멈춤", cap))
+    if low and cap <= Battery.OFF then
         w.next_sync_at = nil
+        w.power_off_wake = nil
+        if Battery.check(store, { asleep = true }) == "off" then return end
+        -- still snoozed ("10분 뒤 다시"): try again when that runs out
+        w.next_sync_at = Battery.snooze_until
+        w.power_off_wake = true
+        Wake.schedule(w)
         return -- KOReader puts the device back to sleep by itself
+    end
+    if w.power_off_wake then
+        -- charged meanwhile: back to the normal schedule
+        w.power_off_wake = nil
+        local hours = Wake.hours(store)
+        w.next_sync_at = hours and (now + math.floor(hours * 3600)) or nil
+        Wake.schedule(w)
+        Device:rescheduleSuspend(3)
+        return
     end
 
     local alarms = Alarm.due(store, store:now())
@@ -167,7 +190,8 @@ function Wake.run(w)
         local parts = {}
         if #alarms > 0 then parts[#parts + 1] = string.format("알림 %d건", #alarms) end
         if sync_due then
-            parts[#parts + 1] = ok and "동기화 성공" or ("동기화 실패: " .. tostring(err))
+            -- first line only: the no-address message is several lines long (v4.1)
+            parts[#parts + 1] = ok and "동기화 성공" or ("동기화 실패: " .. (tostring(err):match("^[^\n]*")))
         end
         Wake.log(store, table.concat(parts, " · ") .. string.format(" (%d초)", os.time() - started))
         -- give the panel a moment to finish, then sleep again

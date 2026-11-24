@@ -1,6 +1,6 @@
 # 인수인계: 새 세션에서 개발을 다시 시작할 때
 
-마지막 정리: 2026-11-11, 플러그인 v4.0 (메뉴 정리로 계획한 기능 대부분 완료). 실기기 Kobo Aura HD에서 사용 중.
+마지막 정리: 2026-11-24, 플러그인 v4.1 (배터리 보호·설정 백업·설정 파일 분리). 실기기 Kobo Aura HD에서 사용 중.
 버전 번호는 소수점 뒤 한 자리(4.1, 4.2 …), 버그 수정은 4.0.1처럼.
 
 ## 1. 새 대화의 첫 메시지 (그대로 붙여 넣기)
@@ -40,13 +40,18 @@ CLAUDE.md 와 docs/HANDOFF.md 를 먼저 읽고 시작해 줘.
 
 - 필요: `luajit` 2.1, `python3` + Pillow, Noto Sans CJK 글꼴, `node`(할 일 시험).
   없으면: `apt-get install -y luajit fonts-noto-cjk nodejs && pip install --break-system-packages pillow`
-- 확인 방법: `tools/README.md`의 회귀 시험(모든 화면 × 두 방향 × 여러 날짜)과 `tools/tests/*` 세 개.
+- 확인 방법: `tools/README.md`의 회귀 시험(모든 화면 × 두 방향 × 여러 날짜)과 `tools/tests/*` 다섯 개.
   11/11에 깨끗한 폴더에서 저장소를 새로 받아 모두 통과함.
 - 기기 쪽 의존: KOReader 내부 API(`UIManager`, `Device.wakeup_mgr`, `rescheduleSuspend`, 위젯 클래스).
   **KOReader를 크게 업데이트하면 깨질 수 있다.** 6개월 뒤 재개할 때 먼저 기기의 KOReader 버전을 확인하고,
   문제가 생기면 KOReader 버전 차이부터 의심한다.
 
-## 4. 현재 상태와 남은 일 (11/11 점검)
+## 4. 현재 상태와 남은 일 (11/11 점검, 11/24 보충)
+
+**v4.1에서 끝낸 것 (11/24)**: 배터리 보호(`dc_battery.lua`), 설정 백업·복원, 설정을 `settings/deskclock_settings.lua`로 분리
+(첫 실행 때 KOReader 설정의 `deskclock` 값을 복사, 원본은 v4.0 되돌리기용으로 그대로 둠), 주소 파일 사라짐 안내.
+계기: 11/21 방전 뒤 `deskclock_urls.txt`가 사라짐(원인 불명, 저장소 손상 의심). 주인 PC에도 보관본이 없어 새로 만들어야 했음.
+**v4.2 후보**: 기기 밖 백업(Apps Script로 구글 드라이브, 비공개 주소 보안 검토 필요).
 
 **v4.0에서 끝낸 것 (11/11)**: 메뉴 재구성, '재시작 필요' 배지, 연속 실패 안내, 제스처 '지금 동기화', Code.gs 머리말.
 '재시작 필요' 배지는 v4.0을 설치한 뒤 그다음 업데이트부터 동작한다(설치를 기록하는 코드가 v4.0부터 있음).

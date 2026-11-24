@@ -7,3 +7,5 @@ deskclock_write.txt
 !tools/sim/holiday.ics
 !tools/sim/data/deskclock_urls.txt
 tools/sim/data/deskclock_cache_*
+# Battery-guard settings backup (holds private calendar addresses)
+deskclock_backup.lua*

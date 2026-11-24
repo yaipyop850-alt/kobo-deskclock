@@ -225,7 +225,9 @@ local stubs = {
     ["datastorage"] = { getDataDir = function() return P .. "/data" end, getSettingsDir = function() return P .. "/data" end },
     ["device"] = {
         screen = Screen, isTouchDevice = function() return true end, hasKeys = function() return false end,
-        getPowerDevice = function() return { getCapacity = function() return 82 end, isCharging = function() return true end } end,
+        -- BATT_CAP=25: battery level shown (not charging); default 82 % charging
+        getPowerDevice = function() return { getCapacity = function() return tonumber(os.getenv("BATT_CAP") or "") or 82 end,
+            isCharging = function() return os.getenv("BATT_CAP") == nil end } end,
     },
     ["ui/widget/textwidget"] = TextWidget,
     ["ui/widget/linewidget"] = LineWidget,
@@ -259,6 +261,8 @@ local settings = { deskclock = {
     month_hide = os.getenv("MONTH_HIDE"),
     -- RESTART=1: an update was installed after this KOReader started ("재시작 필요" badge)
     restart_needed_at = os.getenv("RESTART") and (os.time() + 400 * 86400) or nil,
+    -- URLS_HAD_FILE=1 (run from a copy without data/deskclock_urls.txt): "주소 파일 없음" (v4.1)
+    urls_had_file = os.getenv("URLS_HAD_FILE") and true or nil,
 } }
 G_reader_settings = {
     readSetting = function(_, k) return settings[k] end,
@@ -313,6 +317,14 @@ if MODE == "pick" then
 end
 if MODE == "sleep" then
     wd:onShow()
+    if os.getenv("BATT_OFF_WAKE") then
+        -- going to sleep at the power-off level (v4.1): the sleep screen says so
+        local Dev = package.loaded["device"]
+        Dev.isKobo = function() return true end
+        Dev.wakeup_mgr = { addTask = function() end, removeTasks = function() end }
+        Dev.rescheduleSuspend = function() end
+        require("dc_store"):getSettings().sleep_view = true
+    end
     wd:onSuspend()
 end
 wd[1]:paintTo(0, 0)

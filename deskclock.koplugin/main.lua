@@ -18,6 +18,8 @@ local ICS = require("dc_ics")
 local DeskWidget = require("dc_widget")
 local Update = require("dc_update")
 local ConfirmBox = require("ui/widget/confirmbox")
+-- loaded on first use (keeps the menu/network test harness free of device modules)
+local Battery = setmetatable({}, { __index = function(_, k) return require("dc_battery")[k] end })
 
 local DeskClock = WidgetContainer:extend{
     name = "deskclock",
@@ -55,6 +57,13 @@ local HELP = [[
 ■ 잠든 화면
 · 달력 + 오늘부터의 일정 + 안 한 할 일
 · 메뉴 '자동 동기화 › 잠든 동안 자동 동기화'를 켜면 정해 둔 간격마다 잠시 깨어나 동기화하고 잠든 화면을 새로 그린 뒤 다시 잠듭니다.
+
+■ 배터리 보호
+· 충전 중이 아닐 때 배터리 30%와 20%에서 경고 창을 띄우고 설정을 백업합니다(단계마다 한 번).
+· 15%가 되면 설정을 백업하고 60초 뒤 전원을 끕니다. [지금 끄기]로 바로 끄거나 [10분 뒤 다시]로 미룰 수 있고, 충전기를 연결하면 취소됩니다.
+· 잠든 동안(시계·달력을 남긴 채) 15% 이하가 되면 잠시 깨어나 바로 전원을 끕니다.
+· 백업 파일: KOReader 폴더의 deskclock_backup.lua(이전 것은 .1). 메뉴 '업데이트·관리 › 설정 백업에서 복원'으로 되살립니다. 캘린더 비공개 주소가 들어 있으니 공유하지 마세요.
+· KOReader가 실행 중일 때만 동작합니다(Kobo 기본 화면에서는 동작하지 않음).
 
 ■ 일정 미리 알림
 · 메뉴 '일정 미리 알림'에서 5·10·15·30분 전을 고릅니다. 여러 개를 함께 고를 수 있습니다(예: 30분 전과 10분 전에 각각 알림). 기본은 끔.
@@ -102,6 +111,11 @@ function DeskClock:init()
     end
     self:onDispatcherRegisterActions()
     self.ui.menu:registerToMainMenu(self)
+    -- battery warnings / power-off run on every screen while KOReader is awake
+    Battery.start(CalStore, function()
+        local w = DeskClock.current_widget
+        return w ~= nil and w.syncing == true
+    end)
 end
 
 function DeskClock:show(mode)
@@ -115,9 +129,11 @@ function DeskClock:show(mode)
         mode = mode or CalStore:getSettings().mode or "clock",
     }
     DeskClock.widget_open = true
+    DeskClock.current_widget = widget
     local orig_close = widget.onCloseWidget
     widget.onCloseWidget = function(w, ...)
         DeskClock.widget_open = false
+        if DeskClock.current_widget == w then DeskClock.current_widget = nil end
         return orig_close(w, ...)
     end
     UIManager:show(widget)
@@ -211,7 +227,7 @@ end
 
 function DeskClock:syncFromMenu()
     if #CalStore:getUrls() == 0 then
-        UIManager:show(InfoMessage:new{ text = "먼저 캘린더 주소를 설정해 주세요." })
+        UIManager:show(InfoMessage:new{ text = (CalStore:noAddressMessage()) })
         return
     end
     self:withOnline("캘린더 동기화", function()
@@ -313,7 +329,12 @@ function DeskClock:showDiagnostics()
         "",
         string.format("캘린더 주소: %d개 (%s)", #urls,
             source == "file" and "deskclock_urls.txt" or "메뉴 입력"),
+        "설정 파일: " .. CalStore:absPath(CalStore:settingsPath()),
     }
+    if #urls == 0 then
+        local _, short = CalStore:noAddressMessage()
+        table.insert(lines, "  ⚠ " .. short)
+    end
     for _, f in ipairs(CalStore.stats.files or {}) do
         local desc
         if f.error then
@@ -340,6 +361,8 @@ function DeskClock:showDiagnostics()
         table.insert(lines, string.format("  %d번%s: %s", f.index, f.holiday and "(공휴일)" or "", desc))
     end
     table.insert(lines, string.format("표시 기간 일정: %d건", #CalStore.occurrences))
+    table.insert(lines, "")
+    table.insert(lines, Battery.status(CalStore))
     local M = require("dc_memo")
     do
         local Alarm = require("dc_alarm")
@@ -468,6 +491,52 @@ function DeskClock:rollbackUpdate()
     })
 end
 
+function DeskClock:backupNow()
+    local ok, why = Battery.backup(CalStore, "직접 백업")
+    UIManager:show(InfoMessage:new{
+        text = ok and ("설정을 백업했습니다.\n" .. CalStore:absPath(Battery.backupPath()))
+            or ("백업하지 않았습니다: " .. tostring(why)),
+        timeout = 4,
+    })
+end
+
+function DeskClock:restoreBackup()
+    local data, err = Battery.readBackup()
+    local path = Battery.backupPath()
+    if not data then
+        -- fall back to the previous copy
+        data, err = Battery.readBackup(path .. ".1")
+        if data then path = path .. ".1" end
+    end
+    if not data then
+        UIManager:show(InfoMessage:new{ text = "복원할 백업이 없습니다.\n(" .. tostring(err) .. ")", timeout = 4 })
+        return
+    end
+    local n = 0
+    for line in ((data.urls_file or "") .. "\n" .. (data.settings.urls_text or "")):gmatch("[^\r\n]+") do
+        if line:gsub("^%s*!?%s*", ""):match("^https?://") then n = n + 1 end
+    end
+    local when = os.date("!%Y-%m-%d %H:%M", (data.saved_at or 0) + CalStore:offset())
+    UIManager:show(ConfirmBox:new{
+        text = string.format("%s에 만든 백업(%s)으로 설정을 되돌릴까요?\n캘린더 주소 %d개\n\n지금 설정은 백업 내용으로 바뀝니다. 메모는 기기에 메모가 하나도 없을 때만 되살립니다.",
+            when, tostring(data.reason or ""), n),
+        ok_text = "복원",
+        ok_callback = function()
+            local ok, memos_or_err = Battery.restore(CalStore, path)
+            if not ok then
+                UIManager:show(InfoMessage:new{ text = "복원 실패: " .. tostring(memos_or_err) })
+                return
+            end
+            CalStore:load()
+            CalStore.loaded = true
+            UIManager:show(InfoMessage:new{
+                text = "복원했습니다." .. (memos_or_err and " 메모도 되살렸습니다." or "") .. "\n'지금 동기화'를 실행해 주세요.",
+                timeout = 4,
+            })
+        end,
+    })
+end
+
 function DeskClock:addToMainMenu(menu_items)
     local function intervalItem(hours, label)
         return {
@@ -551,7 +620,7 @@ function DeskClock:addToMainMenu(menu_items)
                 text_func = function()
                     return "일정 미리 알림: " .. (Alarm.leadsText(CalStore) or "끔")
                 end,
-                help_text = "시각이 있는 일정과 '(15:30)'처럼 시각을 적은 할 일을 정한 시간 전에 알립니다. 시점은 여러 개를 함께 고를 수 있습니다. 화면이 세 번 반전되고 '곧 시작합니다' 팝업이 남습니다. 잠들어 있으면 잠시 깨어나(Wi-Fi 없이 30초 안팎) 알린 뒤 팝업을 띄운 채 다시 잠듭니다. 배터리 10% 아래(충전 중 아님)면 깨우지 않습니다. 잠든 동안 알림은 Kobo에서만 동작합니다.",
+                help_text = "시각이 있는 일정과 '(15:30)'처럼 시각을 적은 할 일을 정한 시간 전에 알립니다. 시점은 여러 개를 함께 고를 수 있습니다. 화면이 세 번 반전되고 '곧 시작합니다' 팝업이 남습니다. 잠들어 있으면 잠시 깨어나(Wi-Fi 없이 30초 안팎) 알린 뒤 팝업을 띄운 채 다시 잠듭니다. 배터리가 15% 이하(충전 중 아님)가 되면 알림 대신 전원을 끕니다(배터리 보호). 잠든 동안 알림은 Kobo에서만 동작합니다.",
                 sub_item_table = {
                     leadItem(0, "끄기"),
                     leadItem(5, "5분 전"),
@@ -647,6 +716,8 @@ function DeskClock:addToMainMenu(menu_items)
                 sub_item_table = {
                     { text = "업데이트 확인", keep_menu_open = true, callback = function() self:checkUpdate() end },
                     { text = "이전 버전으로 되돌리기", keep_menu_open = true, callback = function() self:rollbackUpdate() end, separator = true },
+                    { text = "지금 설정 백업", keep_menu_open = true, callback = function() self:backupNow() end },
+                    { text = "설정 백업에서 복원", keep_menu_open = true, callback = function() self:restoreBackup() end, separator = true },
                     { text = "진단 정보", keep_menu_open = true, callback = function() self:showDiagnostics() end },
                 },
             },

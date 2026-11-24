@@ -16,6 +16,13 @@ table.insert(package.loaders, function(name)
     if name:match("^dc_") then return nil end
     return function() return stub() end
 end)
+package.loaded["luasettings"] = { open = function()
+    local t = { d = {} }
+    function t:readSetting(k) return self.d[k] end
+    function t:saveSetting(k, v) self.d[k] = v end
+    function t:flush() end
+    return t
+end }
 package.loaded["datastorage"] = { getDataDir = function() return P .. "/data" end,
     getSettingsDir = function() return P .. "/data" end }
 local settings = { deskclock = { sync_hours = 1, wake_hours = 3, alarm_leads = { 30, 10 }, auto_wifi_sync = true,

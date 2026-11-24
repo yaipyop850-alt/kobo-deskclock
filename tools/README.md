@@ -22,7 +22,9 @@ python3 render.py out.txt out.png <폭> <높이>
 `SYNC_FAIL=1`(SYNC_FLOW와 함께: 연속 실패 안내), `RESTART=1`(설치 후 재시작 안 함 → '재시작 필요' 배지; SYNC_FLOW와 함께면 배지 탭 시험),
 `TITLE_SYNC=1`(전체 달력 제목 터치 → 동기화, 제목 옆은 화면 전환),
 `ALARM_TEST=1`(일정 미리 알림: 할 일 시각 해석, 알림 시점 여러 개·늦게 한꺼번에 울릴 때 한 번만, 잠든 동안 알림·동기화 깨우기 순서, 깨어 있을 때 알림, 한 번만 울림, 배터리 하한; 알림 팝업이 뜬 잠든 화면을 출력 파일로 그림 — 2026-11-04 05:00 UTC 기준),
-`PLUGIN_DIR`(다른 플러그인 폴더).
+`PLUGIN_DIR`(다른 플러그인 폴더), `BATT_CAP=25`(배터리 25%·충전 아님 표시), `BATT_OFF_WAKE=1`(sleep: 15% 이하로 잠들 때 상태 줄), `URLS_HAD_FILE=1`(주소 파일이 없는 복사본에서 '주소 파일 없음').
+
+경고 창 미리보기: `python3 dialog_overlay.py in.png out.png info|confirm "문구\\n…" ["취소|확인"]` — KOReader 기본 창을 흉내 낸 그림(실제 모양과 조금 다름).
 
 회귀 시험: 날짜 여러 개 × 모든 화면 × 1080x1440/1440x1080을 그려 오류와 `overflow`(화면 밖 글자)가 없는지 봅니다.
 
@@ -35,12 +37,16 @@ python3 render.py out.txt out.png <폭> <높이>
 | `tasks_sync_test.lua` + `tasks_fake_appsscript.js` | 실제 `apps-script/Code.gs`를 가짜 구글 할 일 API에 붙여, 기기↔할 일 양방향 동기화(충돌 시 기기 우선) 시험 |
 | `memo_send_test.lua` | 기기에서 만든 일정 보내기(302 리디렉션, 틀린 키, 재전송 중복 방지, 정리) |
 | `network_test.lua` | 메뉴 동작의 Wi-Fi/인터넷 대기(연결됨, DNS 지연, Wi-Fi 켜기, 시간 초과) |
+| `battery_test.lua` | 배터리 보호(v4.1): 30·20% 경고 한 번씩, 충전 시 초기화, 15% 카운트다운(충전기 취소·10분 미루기·동기화 대기·잠든 중 즉시), 백업 쓰기·되읽기·주소 없는 백업으로 덮지 않기·복원 |
+| `store_settings_test.lua` | 설정 파일 분리(v4.1): 첫 실행 이전, KOReader 원본 보존, '주소 파일 없음' 안내 세 가지 |
 
 ```
 W=$(mktemp -d); mkdir -p $W/data
 luajit tools/tests/tasks_sync_test.lua $W
 luajit tools/tests/memo_send_test.lua $W
 luajit tools/tests/network_test.lua
+luajit tools/tests/battery_test.lua $W
+luajit tools/tests/store_settings_test.lua $W
 ```
 
 ## 메뉴 미리보기 (`sim/menu_dump.lua`, `sim/menu_draw.py`)

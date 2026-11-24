@@ -448,7 +448,8 @@ function DeskWidget:finishSync(ok, err, silent)
     end
     if (not ok or err) and not silent then
         local msg = err or "동기화 실패"
-        if streak >= 2 then
+        -- v4.1: a missing address is not a Wi-Fi problem; its message already says what to do
+        if streak >= 2 and self.store.last_fail_kind ~= "no_urls" then
             msg = msg .. string.format("\n\n%d번 연속 실패했습니다. Wi-Fi를 껐다 켜거나, 기기를 재부팅해 보세요.", streak)
         end
         UIManager:show(InfoMessage:new{ text = msg, timeout = streak >= 2 and 10 or 5 })
@@ -644,7 +645,11 @@ function DeskWidget:statusText()
         end
         local bits = { "잠자기 중" }
         if self.next_alarm then bits[#bits + 1] = "다음 알림 " .. when(self.next_alarm) end
-        if self.next_sync_at then bits[#bits + 1] = "다음 자동 동기화 " .. when(self.next_sync_at) end
+        if self.power_off_wake then
+            bits[#bits + 1] = "배터리 부족 — 잠시 뒤 전원 꺼짐"
+        elseif self.next_sync_at then
+            bits[#bits + 1] = "다음 자동 동기화 " .. when(self.next_sync_at)
+        end
         if #bits == 1 then bits[2] = "전원 버튼을 누르면 깨어남" end
         return table.concat(bits, " · ")
     end
@@ -656,7 +661,8 @@ function DeskWidget:statusText()
     end
     local s = self.store:getSettings()
     if #self.store:getUrls() == 0 then
-        table.insert(parts, "캘린더 미설정")
+        local _, short = self.store:noAddressMessage()
+        table.insert(parts, short)
     elseif self:syncStaleAge() then
         -- shown as a black badge next to the text instead
     elseif s.last_sync then
@@ -666,7 +672,8 @@ function DeskWidget:statusText()
     else
         table.insert(parts, "동기화 전")
     end
-    if s.last_error then
+    -- with no address the status already says so; don't repeat it as an error (v4.1)
+    if s.last_error and #self.store:getUrls() > 0 then
         table.insert(parts, "오류: " .. s.last_error)
     end
     return table.concat(parts, "  ·  ")

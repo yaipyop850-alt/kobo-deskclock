@@ -17,7 +17,7 @@ local function lfs_attr(path)
 end
 
 local CalStore = {
-    VERSION = "4.0",
+    VERSION = "4.1",
     -- when this copy of the plugin was loaded (KOReader start); an update installed
     -- after this needs a restart to take effect (status bar shows "재시작 필요")
     loaded_at = os.time(),
@@ -41,21 +41,63 @@ local defaults = {
     mode = "clock",        -- "clock" | "calendar"
 }
 
+--- v4.1: the plugin keeps its settings in a file of its own
+-- (settings/deskclock_settings.lua) instead of KOReader's settings.reader.lua.
+-- Every sync / wake-up log used to rewrite KOReader's whole settings file;
+-- a power cut during that write puts all of KOReader's settings at risk.
+function CalStore:settingsPath()
+    return DataStorage:getSettingsDir() .. "/deskclock_settings.lua"
+end
+
 function CalStore:getSettings()
     if not self.settings then
-        local s = G_reader_settings:readSetting(self.settings_key) or {}
+        local s
+        local ok, LuaSettings = pcall(require, "luasettings")
+        if ok and type(LuaSettings) == "table" and LuaSettings.open then
+            -- LuaSettings falls back to the .old copy if the file is damaged
+            local ok2, f = pcall(LuaSettings.open, LuaSettings, self:settingsPath())
+            if ok2 and f then
+                self.sfile = f
+                s = f:readSetting(self.settings_key)
+            end
+        end
+        local migrate = false
+        if type(s) ~= "table" then
+            -- first start of v4.1 (or the file is gone): take the copy kept in
+            -- KOReader's settings until v4.0. That copy is left untouched, so
+            -- '이전 버전으로 되돌리기' to v4.0 still finds its settings.
+            -- deep copy: the plugin must not keep changing KOReader's table
+            local function copy(t)
+                if type(t) ~= "table" then return t end
+                local c = {}
+                for k, v in pairs(t) do c[k] = copy(v) end
+                return c
+            end
+            s = copy(G_reader_settings:readSetting(self.settings_key)) or {}
+            migrate = true
+        end
         for k, v in pairs(defaults) do
             if s[k] == nil then s[k] = v end
         end
         self.settings = s
+        if migrate and self.sfile then
+            self.migrated_at = os.time()
+            self:save()
+        end
     end
     return self.settings
 end
 
 function CalStore:save()
-    G_reader_settings:saveSetting(self.settings_key, self.settings)
-    -- Write to disk now: KOReader otherwise only flushes on exit/suspend.
-    if G_reader_settings.flush then G_reader_settings:flush() end
+    if not self.settings then self:getSettings() end
+    if self.sfile then
+        self.sfile:saveSetting(self.settings_key, self.settings)
+        self.sfile:flush()
+    else
+        -- no LuaSettings (should not happen on a device): old behaviour
+        G_reader_settings:saveSetting(self.settings_key, self.settings)
+        if G_reader_settings.flush then G_reader_settings:flush() end
+    end
 end
 
 function CalStore:set(key, value)
@@ -189,7 +231,55 @@ function CalStore:getUrls()
     self.post_source = self.post_url and "urls" or nil
     if w then self.post_url, self.post_source = w, "write" end
     self.urls, self.urls_source = list, source
+    -- remember that addresses came from the file, so a vanished file can be
+    -- told apart from "never set up" (v4.1)
+    if source == "file" and #list > 0 and not self:getSettings().urls_had_file then
+        self:getSettings().urls_had_file = true
+        self:save()
+    end
     return list, source
+end
+
+--- No calendar address now, but there were some before? (v4.1)
+-- @return lost (bool), had_file (bool), has_cache (bool)
+function CalStore:addressesLost()
+    if #self:getUrls() > 0 then return false end
+    local had_file = self:getSettings().urls_had_file == true
+    local has_cache = false
+    local ok, lfs = pcall(require, "libs/libkoreader-lfs")
+    if ok and type(lfs) == "table" and lfs.dir then
+        pcall(function()
+            for name in lfs.dir(DataStorage:getSettingsDir()) do
+                if name:match("^deskclock_cache_%x+%.ics$") then has_cache = true break end
+            end
+        end)
+    end
+    return had_file or has_cache, had_file, has_cache
+end
+
+--- What to tell the owner when there is no calendar address.
+-- @return long message, short status text
+function CalStore:noAddressMessage()
+    local lost, had_file, has_cache = self:addressesLost()
+    if not lost then
+        return "등록된 캘린더 주소가 없습니다.\n메뉴 '구글 연결 › 캘린더 주소 입력'에 넣거나, PC로 deskclock_urls.txt를 넣어 주세요(설치·사용 가이드 2단계).",
+            "캘린더 미설정"
+    end
+    local lines = {
+        had_file and "캘린더 주소 파일(deskclock_urls.txt)이 없어졌습니다." or "캘린더 주소가 없어졌습니다.",
+    }
+    if has_cache then
+        lines[#lines + 1] = "예전에 받은 일정 파일은 남아 있지만, 주소가 없어 표시하거나 새로 받을 수 없습니다."
+    end
+    lines[#lines + 1] = "Wi-Fi 문제가 아닙니다."
+    local okb, Battery = pcall(require, "dc_battery")
+    local backup = okb and Battery.readBackup and Battery.readBackup()
+    if backup and Battery.backupHasUrls(backup) then
+        lines[#lines + 1] = "\n메뉴 '업데이트·관리 › 설정 백업에서 복원'으로 되살릴 수 있습니다."
+    else
+        lines[#lines + 1] = "\nPC로 KOReader 폴더(.adds/koreader)에 deskclock_urls.txt를 다시 넣어 주세요(설치·사용 가이드 2단계). 다시 만든 파일은 PC에도 보관해 두세요."
+    end
+    return table.concat(lines, "\n"), "주소 파일 없음"
 end
 
 -- Turn LuaSocket's English network errors into something actionable.
@@ -311,9 +401,12 @@ function CalStore:sync()
         end
     end
     if #urls == 0 then
-        self:set("last_error", "캘린더 주소 없음")
-        return false, "등록된 캘린더 주소가 없습니다."
+        local msg, short = self:noAddressMessage()
+        self.last_fail_kind = "no_urls"
+        self:set("last_error", short)
+        return false, msg
     end
+    self.last_fail_kind = nil
     local errors = {}
     local got = 0
     for i, item in ipairs(urls) do
